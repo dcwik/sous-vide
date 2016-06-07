@@ -15,7 +15,6 @@
  // TODOs
  // -ensure 12 bit resolution
  // -figure out "read time slots"
- // -ensure single device
  // -ensure device has an external power supply
 
 #include <OneWire.h>
