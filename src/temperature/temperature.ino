@@ -56,8 +56,8 @@ void setup(void)
 
 void loop(void)
 {
-  // TODO figure out why this is 12!
-  byte data[12];
+  // we only ever read the first 9 bytes from the Scratchpad
+  byte data[9];
   
   // 8 byte address for devices on the 1-wire bus
   byte addr[8];
@@ -268,8 +268,15 @@ int validateResolution(byte *addr, byte *data)
       ds.select(addr);
       ds.write(COMMAND_WRITE_SCRATCHPAD);
       
-      // the DS18B20 now expects 3 bytes to be written (the TH,
-      // TL, and config register), which it puts in the Scratchpad
+      // The DS18B20 now expects 3 bytes to be written (the TH,
+      // TL, and config register), which it puts in the
+      // Scratchpad. TH and TL are the high and low alarm
+      // triggers, meaning if the temperature was out of that
+      // range and we issued a 0xEC alarm search, the device
+      // would respond. Since we don't use the alarm triggers,
+      // we could store anything we'd like there, and it would
+      // be non-volatile! Oh well, let's use what was already
+      // set there.
       ds.write(data[2]); // unchanged TH
       ds.write(data[3]); // unchanged TL
       ds.write((desiredR1R2 << 5) | 0x1F); // new config reg
