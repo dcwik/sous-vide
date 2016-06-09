@@ -13,6 +13,7 @@
  */
  
 #include <OneWire.h>
+#include <LedControl.h>
 
 // DEBUG can be toggled to make serial communication less noisy
 #define DEBUG true
@@ -40,9 +41,17 @@
 // create the 1-wire bus
 OneWire ds(ONE_WIRE_BUS_PIN);
 
+// create LED controller
+LedControl lc = LedControl(7, 6, 5, 1);
+
 void setup(void)
 {
   Serial.begin(9600);
+
+  // wake up the 7-segment display, set brightness, clear
+  lc.shutdown(0, false);
+  lc.setIntensity(0, 8);
+  lc.clearDisplay(0);
 }
 
 void loop(void)
@@ -400,16 +409,31 @@ void showTemperature(int sensorReading)
   // the "fractional part".
   int fractCelsius = ((sensorReading & 0x000F) * 100) >> 4;
   
-  if (isNegative)
+  if (DEBUG)
   {
-    Serial.print('-');
+    if (isNegative)
+    {
+      Serial.print('-');
+    }
+    Serial.print(wholeCelsius);
+    Serial.print('.');
+    Serial.print(fractCelsius);
+    Serial.println(" C");
   }
-  Serial.print(wholeCelsius);
-  Serial.print('.');
-  Serial.print(fractCelsius);
-  Serial.println(" C");
   
-  // TODO show on 7-segment display
+  if (wholeCelsius < 100)
+  {
+    int tens = wholeCelsius / 10;
+    int ones = wholeCelsius % 10;
+    int tenths = fractCelsius / 10;
+    int hundreths = fractCelsius % 10;
+
+    lc.setDigit(0, 7, tens, false);
+    lc.setDigit(0, 6, ones, true);
+    lc.setDigit(0, 5, tenths, false);
+    lc.setDigit(0, 4, hundreths, false);
+    lc.setRow(0, 3, 0x4E);
+  }
 }
 
 void showError(int errorCode)
