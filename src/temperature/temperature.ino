@@ -5,36 +5,40 @@
  *
  * Logic for reading temperature using the OneWire v2.3.2 library,
  * (commit 57c18c6de80c13429275f70875c7c341f1719201), with an
- * externally powered (ie, not in parasitic mode) DS18B20 sensor
- * connected to pin 10, as well as a 4.7K Ohm resistor between 5V
- * and pin 10.
+ * externally powered (ie, not in parasite power mode) DS18B20
+ * sensor connected to pin 10, as well as a 4.7K Ohm resistor
+ * between 5V and pin 10.
  *
  * This example code is in the public domain.
  */
  
- // TODOs
- // -ensure 12 bit resolution
- // -figure out "read time slots"
- // -ensure device has an external power supply
-
 #include <OneWire.h>
 
 // DEBUG can be toggled to make serial communication less noisy
 #define DEBUG true
 
 // pin assignments
-#define ONE_WIRE_PIN 10
+#define ONE_WIRE_BUS_PIN 10
+
+// 1-wire bus commands
+#define COMMAND_CONVERT_T         0x44
+#define COMMAND_READ_SCRATCHPAD   0xBE
+#define COMMAND_WRITE_SCRATCHPAD  0x4E
+#define COMMAND_COPY_SCRATCHPAD   0x48
+#define COMMAND_READ_POWER_SUPPLY 0xB4
 
 // error codes
-#define NO_ERROR                      0
-#define ERROR_OWB_NO_DEVICES          1
-#define ERROR_OWB_TOO_MANY_DEVICES    2
-#define ERROR_OWB_ADDRESS_CRC         3
-#define ERROR_OWB_NOT_28_FAMILY       4
-#define ERROR_OWB_SCRATCHPAD_READ_CRC 5
+#define NO_ERROR                         0
+#define ERROR_OWB_NO_DEVICES             1
+#define ERROR_OWB_TOO_MANY_DEVICES       2
+#define ERROR_OWB_ADDRESS_CRC            3
+#define ERROR_OWB_NOT_28_FAMILY          4
+#define ERROR_OWB_SCRATCHPAD_READ_CRC    5
+#define ERROR_OWB_SCRATCHPAD_WRITE_CRC   6
+#define ERROR_OWB_NOT_EXTERNALLY_POWERED 7
 
 // create the 1-wire bus
-OneWire ds(ONE_WIRE_PIN);
+OneWire ds(ONE_WIRE_BUS_PIN);
 
 void setup(void)
 {
@@ -70,6 +74,16 @@ void loop(void)
     Serial.println();
   }
   
+  // ensure the device is powered externally
+  result = verifyExternallyPowered(addr);
+  if (result != NO_ERROR)
+  {
+    showError(result);
+    delay(5000);
+    return;
+  }
+  
+  // query the DS18B20, write into data
   result = querySensor(addr, data);
   if (result != NO_ERROR)
   {
@@ -86,7 +100,8 @@ void loop(void)
     Serial.println();
   }
   
-  result = validatePrecision(addr, data);
+  // ensure the DS18B20 has the right bit resolution
+  result = validateResolution(addr, data);
   if (result != NO_ERROR)
   {
     showError(result);
@@ -146,25 +161,47 @@ int findSingleDevice(byte *addr)
   return NO_ERROR;
 }
 
+int verifyExternallyPowered(byte *addr)
+{
+  // issue a "read power supply" command
+  ds.reset();
+  ds.select(addr);
+  ds.write(COMMAND_READ_POWER_SUPPLY);
+
+  // parasite powered devices will pull the bus low, externally
+  // powered devices will let the bus remain high
+  if (ds.read_bit() == 0)
+  {
+    return ERROR_OWB_NOT_EXTERNALLY_POWERED;
+  }
+  
+  return NO_ERROR;
+}
+
 int querySensor(byte *addr, byte *data)
 {
-  // all 1-wire bus command start with a reset
-  ds.reset();
-  ds.select(addr);
-  
   // trigger a Convert T command (ie, get temperature and store it
   // on the DS18B20's Scratchpad memory)
-  ds.write(0x44);
-  
   ds.reset();
   ds.select(addr);
+  ds.write(COMMAND_CONVERT_T);
   
-  ds.write(0xBE);
-
-  for (int i = 0; i < 9; ++i)
-  {
-    data[i] = ds.read();
-  }
+  // During a Convert T with an externally powered DS18B20, the
+  // device keeps the 1-wire bus low until it is done the convert.
+  // This means that we don't have to delay an arbitrary amount
+  // of time, instead we just keep polling until the bus goes
+  // high. If we were using parasite power mode, we as the master
+  // of the bus would have to keep the bus high to power the device
+  // and must wait an arbitrary (but long enough) amount of time
+  // for the convert to complete.
+  while (ds.read_bit() == 0);
+  
+  
+  // send read command and read the bytes
+  ds.reset();
+  ds.select(addr);
+  ds.write(COMMAND_READ_SCRATCHPAD);
+  ds.read_bytes(data, 9);
   
   if (OneWire::crc8(data, 8) != data[8])
   {
@@ -173,9 +210,86 @@ int querySensor(byte *addr, byte *data)
   return NO_ERROR;
 }
 
-int validatePrecision(byte *addr, byte *data)
+int validateResolution(byte *addr, byte *data)
 {
-  // TODO implement
+  // config register format:
+  //
+  //   0  R1 R2 1    1  1  1  1
+  //   ^        ^    ^  ^  ^  ^
+  //   |        |    |  |  |  |
+  //   +--------+----+--+--+--+
+  //                 |
+  //   Do not change these, they should remain
+  //   as they are. Only change R1 and R2 as 
+  //   per the table below.
+  //
+  //   R1  R2  Value  Resolution (bits)
+  //  --------------------------------
+  //   0   0   0x0    9
+  //   0   1   0x1    10
+  //   1   0   0x2    11
+  //   1   1   0x3    12
+  
+  // can only be set to 0x0, 0x1, 0x2, or 0x3
+  byte desiredR1R2 = 0x3;
+  
+  // 5th byte is config register
+  byte actualR1R2 = data[4] >> 5;
+
+  if (actualR1R2 != desiredR1R2)
+  {
+    if (DEBUG)
+    {
+      Serial.print("Wanted ");
+      Serial.print(desiredR1R2 + 9);
+      Serial.print("-bit resolution, found ");
+      Serial.print(actualR1R2 + 9);
+      Serial.println("-bit");
+    }
+    
+    // try writing the desired resolution to the Scratchpad
+    
+    byte writeAttempts = 0;
+    while (true)
+    {
+      writeAttempts +=1;
+      
+      // send "write Scratchpad" command
+      ds.reset();
+      ds.select(addr);
+      ds.write(COMMAND_WRITE_SCRATCHPAD);
+      
+      // the DS18B20 now expects 3 bytes to be written (the TH,
+      // TL, and config register), which it puts in the Scratchpad
+      ds.write(data[2]); // unchanged TH
+      ds.write(data[3]); // unchanged TL
+      ds.write((desiredR1R2 << 5) | 0x1F); // new config reg
+      
+      // read the Scratchpad to ensure write was successful via CRC
+      ds.reset();
+      ds.select(addr);
+      ds.write(COMMAND_READ_SCRATCHPAD);
+      ds.read_bytes(data, 9);
+      
+      if ((data[4] >> 5) == desiredR1R2
+          && OneWire::crc8(data, 8) == data[8])
+      {
+        // yay, write to Scratchpad was successful!
+        break;
+      }
+      else if (writeAttempts >= 2)
+      {
+        // error out if we've tried too many times
+        return ERROR_OWB_SCRATCHPAD_WRITE_CRC;
+      }
+    }
+    
+    // finally, copy Scratchpad to EEPROM (ie, persistent storage)
+    ds.reset();
+    ds.select(addr);
+    ds.write(COMMAND_COPY_SCRATCHPAD);
+  }
+  
   return NO_ERROR;
 }
 
