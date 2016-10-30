@@ -57,9 +57,10 @@
 #define ERROR_OWB_SCRATCHPAD_WRITE_CRC   6
 #define ERROR_OWB_NOT_EXTERNALLY_POWERED 7
 
-#define STATE_SET_UNITS 0
-#define STATE_READ_TEMP 1
-#define STATE_ERROR     3
+#define STATE_SET_UNITS    0
+#define STATE_SET_TEMP_INT 1
+#define STATE_READ_TEMP    2
+#define STATE_ERROR        3
 
 #define DEBOUNCE_DELAY_MS     50
 #define LONG_PRESS_DELAY_MS 2000
@@ -119,6 +120,9 @@ int processInputs(int state)
     case STATE_SET_UNITS:
       return processSetUnits();
       break;
+    case STATE_SET_TEMP_INT:
+      return processSetTempInt();
+      break;
     case STATE_READ_TEMP:
       return processReadTemp();
       break;
@@ -132,13 +136,23 @@ int processSetUnits()
 {
   byte buttonState = readButtonState();
   
-  if (checkButtonState(buttonState, RIGHT_BUTTON_PIN, BUTTON_PRESSED))
+  if (checkButtonState(buttonState, SELECT_BUTTON_PIN, BUTTON_PRESSED))
+  {
+    return STATE_SET_TEMP_INT;
+  }
+  else if (checkButtonState(buttonState, LEFT_BUTTON_PIN, BUTTON_PRESSED)
+      || checkButtonState(buttonState, RIGHT_BUTTON_PIN, BUTTON_PRESSED))
   {
     Serial.println("toggle!");
     mIsCelsius = !mIsCelsius;
   }
   
   return STATE_SET_UNITS;
+}
+
+int processSetTempInt()
+{
+  return STATE_SET_TEMP_INT;
 }
 
 long mLastReadTemp = 0;
@@ -227,6 +241,9 @@ void display(int state)
   {
     case STATE_SET_UNITS:
       displayUnits();
+      break;
+    case STATE_SET_TEMP_INT:
+      displaySetTempInt();
       break;
     case STATE_READ_TEMP:
       displayReadTemp();
@@ -643,28 +660,48 @@ void showTemperature(int sensorReading)
 
 void displayUnits()
 {
-  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
-  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
-  {
-    mLedControl.setRow(0, 1, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
-  }
-  else
-  {
-    // clear out digit (for blink effect)
-    mLedControl.setRow(0, 1, 0);
-  }
-  
-  // TODO don't write if already set
+  // TODO don't write if already set?
   mLedControl.setRow(0, 7, LED_CHAR_U);
   mLedControl.setRow(0, 6, LED_CHAR_N);
   mLedControl.setRow(0, 5, LED_CHAR_I);
   mLedControl.setRow(0, 4, LED_CHAR_T | LED_CHAR_DOT);
   mLedControl.setRow(0, 3, LED_CHAR_Q_MARK);
+  mLedControl.setRow(0, 2, 0);
+  mLedControl.setRow(0, 1, 0);
+  
+  blinkChar(0, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
+}
+
+void displaySetTempInt()
+{
+  mLedControl.setRow(0, 7, LED_CHAR_T | LED_CHAR_DOT);
+  mLedControl.setRow(0, 6, LED_CHAR_Q_MARK);
+  mLedControl.setRow(0, 5, 0);
+  mLedControl.setRow(0, 4, 0);
+  mLedControl.setRow(0, 3, 0);
+  mLedControl.setRow(0, 2, 0);
+  mLedControl.setRow(0, 1, 0);
+  mLedControl.setRow(0, 0, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
 void displayReadTemp()
 {
   showTemperature(mSensorReading);
+}
+
+void blinkChar(int row, byte value)
+{
+  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
+  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
+  {
+    mLedControl.setRow(0, row, value);
+  }
+  else
+  {
+    // clear out digit (for blink effect)
+    mLedControl.setRow(0, row, 0);
+  }
+
 }
 
 void displayError()
