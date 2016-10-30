@@ -20,6 +20,10 @@
 
 // pin assignments
 #define ONE_WIRE_BUS_PIN 10
+#define LED_DIN_PIN      7
+#define LED_CLK_PIN      6
+#define LED_CS_PIN       5
+#define LED_NUM_DEVICES  1
 
 // 1-wire bus commands
 #define COMMAND_CONVERT_T         0x44
@@ -42,7 +46,11 @@
 OneWire ds(ONE_WIRE_BUS_PIN);
 
 // create LED controller
-LedControl lc = LedControl(7, 6, 5, 1);
+LedControl lc = LedControl(
+    LED_DIN_PIN,
+    LED_CLK_PIN,
+    LED_CS_PIN,
+    LED_NUM_DEVICES);
 
 void setup(void)
 {
