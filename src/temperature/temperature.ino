@@ -674,13 +674,13 @@ void displayUnits()
 
 void displaySetTempInt()
 {
-  mLedControl.setRow(0, 7, LED_CHAR_T | LED_CHAR_DOT);
-  mLedControl.setRow(0, 6, LED_CHAR_Q_MARK);
-  mLedControl.setRow(0, 5, 0);
-  mLedControl.setRow(0, 4, 0);
-  mLedControl.setRow(0, 3, 0);
-  mLedControl.setRow(0, 2, 0);
-  mLedControl.setRow(0, 1, 0);
+  blinkDigit(7, 0, false);
+  blinkDigit(6, 0, false);
+  blinkDigit(5, 0, false);
+  blinkDigit(4, 0, true);
+  mLedControl.setDigit(0, 3, 0, false);
+  mLedControl.setDigit(0, 2, 0, false);
+  mLedControl.setDigit(0, 1, 0, false);
   mLedControl.setRow(0, 0, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
@@ -689,6 +689,19 @@ void displayReadTemp()
   showTemperature(mSensorReading);
 }
 
+void blinkDigit(int row, byte value, bool showPoint)
+{
+  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
+  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
+  {
+    mLedControl.setDigit(0, row, value, showPoint);
+  }
+  else
+  {
+    // clear out digit (for blink effect)
+    mLedControl.setRow(0, row, showPoint ? LED_CHAR_DOT : 0);
+  }
+}
 void blinkChar(int row, byte value)
 {
   int offsetInPeriod = millis() % FLASH_PERIOD_MS;
@@ -701,7 +714,6 @@ void blinkChar(int row, byte value)
     // clear out digit (for blink effect)
     mLedControl.setRow(0, row, 0);
   }
-
 }
 
 void displayError()
