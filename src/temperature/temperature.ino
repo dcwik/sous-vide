@@ -25,6 +25,17 @@
 #define LED_CS_PIN       5
 #define LED_NUM_DEVICES  1
 
+#define LED_CHAR_C      0x4E
+#define LED_CHAR_E      0x4F
+#define LED_CHAR_F      0x47
+#define LED_CHAR_I      0x04
+#define LED_CHAR_N      0x15
+#define LED_CHAR_R      0x05
+#define LED_CHAR_T      0x0F
+#define LED_CHAR_U      0x1C
+#define LED_CHAR_DOT    0x80
+#define LED_CHAR_Q_MARK 0x65
+
 // 1-wire bus commands
 #define COMMAND_CONVERT_T         0x44
 #define COMMAND_READ_SCRATCHPAD   0xBE
@@ -42,36 +53,82 @@
 #define ERROR_OWB_SCRATCHPAD_WRITE_CRC   6
 #define ERROR_OWB_NOT_EXTERNALLY_POWERED 7
 
+#define STATE_SET_UNITS 0
+#define STATE_READ_TEMP 1
+#define STATE_ERROR     3
+
+#define FLASH_PERIOD_MS 1000
+
 // create the 1-wire bus
 OneWire ds(ONE_WIRE_BUS_PIN);
 
 // create LED controller
-LedControl lc = LedControl(
+LedControl mLedControl = LedControl(
     LED_DIN_PIN,
     LED_CLK_PIN,
     LED_CS_PIN,
     LED_NUM_DEVICES);
+
+// consider byte?
+int mState;
+
+// the 2-byte temperature reading from the sensor
+int mSensorReading;
+
+boolean mIsCelsius;
 
 void setup(void)
 {
   Serial.begin(9600);
 
   // wake up the 7-segment display, set brightness, clear
-  lc.shutdown(0, false);
-  lc.setIntensity(0, 8);
-  lc.clearDisplay(0);
+  mLedControl.shutdown(0, false);
+  mLedControl.setIntensity(0, 8);
+  mLedControl.clearDisplay(0);
+  
+  // start in temperature setting mode
+  mState = STATE_SET_UNITS;
+  mSensorReading = 0;
+  mIsCelsius = true;
 }
 
 void loop(void)
+{
+  mState = processInputs(mState);
+  
+  display(mState);
+}
+
+int processInputs(int state)
+{
+  switch (state)
+  {
+    case STATE_SET_UNITS:
+      return processSetUnits();
+      break;
+    case STATE_READ_TEMP:
+      return processReadTemp();
+      break;
+    case STATE_ERROR:
+    default:
+      break;
+  }
+}
+
+int processSetUnits()
+{
+  return STATE_SET_UNITS;
+}
+
+long mLastReadTemp = 0;
+
+int processReadTemp()
 {
   // we only ever read the first 9 bytes from the Scratchpad
   byte data[9];
   
   // 8 byte address for devices on the 1-wire bus
   byte addr[8];
-  
-  // the 2-byte temperature reading from the sensor
-  int sensorReading = 0;
   
   int result;
   
@@ -80,7 +137,7 @@ void loop(void)
   {
     showError(result);
     delay(5000);
-    return;
+    return STATE_ERROR;
   }
   
   // print out the device's unique address
@@ -97,8 +154,18 @@ void loop(void)
   {
     showError(result);
     delay(5000);
-    return;
+    return STATE_ERROR;
   }
+  
+  long now = millis();
+  
+  // break out early if we've read recently
+  if (now - mLastReadTemp < 2000)
+  {
+    return STATE_READ_TEMP;
+  }
+  
+  mLastReadTemp = now;
   
   // query the DS18B20, write into data
   result = querySensor(addr, data);
@@ -106,7 +173,7 @@ void loop(void)
   {
     showError(result);
     delay(5000);
-    return;
+    return STATE_ERROR;
   }
   
   // print out data from the scratchpad
@@ -123,16 +190,31 @@ void loop(void)
   {
     showError(result);
     delay(5000);
-    return;
+    return STATE_ERROR;
   }
   
   // first 2 bytes read are the temperature data, with the first
   // byte being the least significant bits
-  sensorReading = (data[1] << 8) | data[0];
+  mSensorReading = (data[1] << 8) | data[0];
   
-  showTemperature(sensorReading);
-  
-  delay(2000);
+  return STATE_READ_TEMP;
+}
+
+void display(int state)
+{
+  switch (state)
+  {
+    case STATE_SET_UNITS:
+      displayUnits();
+      break;
+    case STATE_READ_TEMP:
+      displayReadTemp();
+      break;
+    case STATE_ERROR:
+    default:
+      displayError();
+      break;
+  }
 }
 
 /**
@@ -443,12 +525,47 @@ void showTemperature(int sensorReading)
     int tenths = fractCelsius / 10;
     int hundreths = fractCelsius % 10;
 
-    lc.setDigit(0, 7, tens, false);
-    lc.setDigit(0, 6, ones, true);
-    lc.setDigit(0, 5, tenths, false);
-    lc.setDigit(0, 4, hundreths, false);
-    lc.setRow(0, 3, 0x4E); // "C"
+    mLedControl.setDigit(0, 7, tens, false);
+    mLedControl.setDigit(0, 6, ones, true);
+    mLedControl.setDigit(0, 5, tenths, false);
+    mLedControl.setDigit(0, 4, hundreths, false);
+    mLedControl.setRow(0, 3, LED_CHAR_C); // "C"
   }
+}
+
+void displayUnits()
+{
+  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
+  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
+  {
+    mLedControl.setRow(0, 1, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
+  }
+  else
+  {
+    // turn off display for blink effect
+    mLedControl.setRow(0, 1, 0);
+  }
+  
+  // TODO don't write if already set
+  mLedControl.setRow(0, 7, LED_CHAR_U);
+  mLedControl.setRow(0, 6, LED_CHAR_N);
+  mLedControl.setRow(0, 5, LED_CHAR_I);
+  mLedControl.setRow(0, 4, LED_CHAR_T | LED_CHAR_DOT);
+  mLedControl.setRow(0, 3, LED_CHAR_Q_MARK);
+}
+
+void displayReadTemp()
+{
+  showTemperature(mSensorReading);
+}
+
+void displayError()
+{
+  mLedControl.setRow(0, 7, LED_CHAR_E);
+  mLedControl.setRow(0, 6, LED_CHAR_R);
+  mLedControl.setRow(0, 5, LED_CHAR_R);
+  mLedControl.setRow(0, 4, 0);
+  mLedControl.setRow(0, 3, LED_CHAR_R);
 }
 
 void showError(int errorCode)
