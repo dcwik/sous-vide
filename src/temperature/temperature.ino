@@ -136,7 +136,7 @@ void loop(void)
 }
 
 /**
- * Looks for a single device on the 1-wire bus. If found, it's
+ * Looks for a single device on the 1-wire bus. If found, its
  * address will be written into addr and NO_ERROR will be
  * returned, otherwise an error code will be returned.
  */
@@ -447,7 +447,7 @@ void showTemperature(int sensorReading)
     lc.setDigit(0, 6, ones, true);
     lc.setDigit(0, 5, tenths, false);
     lc.setDigit(0, 4, hundreths, false);
-    lc.setRow(0, 3, 0x4E);
+    lc.setRow(0, 3, 0x4E); // "C"
   }
 }
 
