@@ -20,9 +20,13 @@
 
 // pin assignments
 #define ONE_WIRE_BUS_PIN 10
-#define LED_DIN_PIN      7
-#define LED_CLK_PIN      6
-#define LED_CS_PIN       5
+#define LED_DIN_PIN       7
+#define LED_CLK_PIN       6
+#define LED_CS_PIN        5
+#define LEFT_BUTTON_PIN   2
+#define RIGHT_BUTTON_PIN  8
+#define SELECT_BUTTON_PIN 4
+
 #define LED_NUM_DEVICES  1
 
 #define LED_CHAR_C      0x4E
@@ -57,7 +61,12 @@
 #define STATE_READ_TEMP 1
 #define STATE_ERROR     3
 
-#define FLASH_PERIOD_MS 1000
+#define DEBOUNCE_DELAY_MS     50
+#define LONG_PRESS_DELAY_MS 2000
+#define FLASH_PERIOD_MS     1000
+
+#define BUTTON_PRESSED      0x01
+#define BUTTON_LONG_PRESSED 0x10
 
 // create the 1-wire bus
 OneWire ds(ONE_WIRE_BUS_PIN);
@@ -80,6 +89,10 @@ boolean mIsCelsius;
 void setup(void)
 {
   Serial.begin(9600);
+  
+  pinMode(LEFT_BUTTON_PIN, INPUT);
+  pinMode(RIGHT_BUTTON_PIN, INPUT);
+  pinMode(SELECT_BUTTON_PIN, INPUT);
 
   // wake up the 7-segment display, set brightness, clear
   mLedControl.shutdown(0, false);
@@ -117,6 +130,14 @@ int processInputs(int state)
 
 int processSetUnits()
 {
+  byte buttonState = readButtonState();
+  
+  if (checkButtonState(buttonState, RIGHT_BUTTON_PIN, BUTTON_PRESSED))
+  {
+    Serial.println("toggle!");
+    mIsCelsius = !mIsCelsius;
+  }
+  
   return STATE_SET_UNITS;
 }
 
@@ -411,6 +432,93 @@ void printHexBytes(byte *bytes, int len)
   }
 }
 
+int mButtonState[3];
+int mLastButtonState[3];
+long mLastDebounceTime[3];
+long mButtonDownSince[3];
+
+byte readButtonState()
+{
+  byte state = 0;
+  int reading;
+
+  for (byte i = 0; i < 3; ++i)
+  {
+    reading = digitalRead(getPinNumber(i));
+    
+    int now = millis();
+    
+    if (reading != mLastButtonState[i])
+    {
+      mLastDebounceTime[i] = now;
+    }
+    
+    if ((now - mLastDebounceTime[i]) > DEBOUNCE_DELAY_MS)
+    {
+      if (reading != mButtonState[i])
+      {
+        mButtonState[i] = reading;
+        
+        if (mButtonState[i] == HIGH)
+        {
+          state |= (BUTTON_PRESSED << (i * 2));
+          mButtonDownSince[i] = now;
+        }
+        else
+        {
+          // state is already zero
+        }
+      }
+      else if (now - mButtonDownSince[i] > LONG_PRESS_DELAY_MS)
+      {
+        if (mButtonState[i] == HIGH)
+        {
+          state |= (BUTTON_LONG_PRESSED << (i * 2));
+        }
+      }
+    }
+    
+    mLastButtonState[i] = reading;
+  }
+  
+  return state;
+}
+
+byte getPinNumber(byte i)
+{
+  switch (i)
+  {
+    case 0:
+      return LEFT_BUTTON_PIN;
+    case 1:
+      return RIGHT_BUTTON_PIN;
+    case 2:
+      return SELECT_BUTTON_PIN;
+  }
+}
+
+boolean checkButtonState(byte state, byte pin, byte mask)
+{
+  byte shift;
+  
+  switch (pin)
+  {
+    case LEFT_BUTTON_PIN:
+      shift = 0;
+      break;
+    case RIGHT_BUTTON_PIN:
+      shift = 1;
+      break;
+    case SELECT_BUTTON_PIN:
+      shift = 2;
+      break;
+    default:
+      return false;
+  }
+    
+  return (state & (mask << (shift * 2))) != 0;
+}
+
 /**
  * Prints a 2 digit hex value to the serial port.
  */
@@ -542,7 +650,7 @@ void displayUnits()
   }
   else
   {
-    // turn off display for blink effect
+    // clear out digit (for blink effect)
     mLedControl.setRow(0, 1, 0);
   }
   
