@@ -19,15 +19,13 @@
 #define DEBUG true
 
 // pin assignments
-#define ONE_WIRE_BUS_PIN 10
-#define LED_DIN_PIN       7
-#define LED_CLK_PIN       6
-#define LED_CS_PIN        5
-#define LEFT_BUTTON_PIN   2
-#define RIGHT_BUTTON_PIN  8
-#define SELECT_BUTTON_PIN 4
-
-#define LED_NUM_DEVICES  1
+#define PIN_ONE_WIRE_BUS 10
+#define PIN_LED_DIN       7
+#define PIN_LED_CLK       6
+#define PIN_LED_CS        5
+#define PIN_BUTTON_LEFT   2
+#define PIN_BUTTON_RIGHT  8
+#define PIN_BUTTON_SELECT 4
 
 #define LED_CHAR_C      0x4E
 #define LED_CHAR_E      0x4F
@@ -62,22 +60,22 @@
 #define STATE_READ_TEMP    2
 #define STATE_ERROR        3
 
-#define DEBOUNCE_DELAY_MS     50
-#define LONG_PRESS_DELAY_MS 2000
-#define FLASH_PERIOD_MS     1000
+#define DELAY_MS_DEBOUNCE     50
+#define DELAY_MS_LONG_PRESS 2000
+#define PERIOD_MS_FLASH     1000
 
-#define BUTTON_PRESSED      0x01
-#define BUTTON_LONG_PRESSED 0x10
+#define MASK_BUTTON_PRESSED      0x01
+#define MASK_BUTTON_LONG_PRESSED 0x10
 
 // create the 1-wire bus
-OneWire ds(ONE_WIRE_BUS_PIN);
+OneWire ds(PIN_ONE_WIRE_BUS);
 
 // create LED controller
 LedControl mLedControl = LedControl(
-    LED_DIN_PIN,
-    LED_CLK_PIN,
-    LED_CS_PIN,
-    LED_NUM_DEVICES);
+    PIN_LED_DIN,
+    PIN_LED_CLK,
+    PIN_LED_CS,
+    1); // 1 device
 
 // consider byte?
 int mState;
@@ -91,9 +89,9 @@ void setup(void)
 {
   Serial.begin(9600);
   
-  pinMode(LEFT_BUTTON_PIN, INPUT);
-  pinMode(RIGHT_BUTTON_PIN, INPUT);
-  pinMode(SELECT_BUTTON_PIN, INPUT);
+  pinMode(PIN_BUTTON_LEFT, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_RIGHT, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_SELECT, INPUT_PULLUP);
 
   // wake up the 7-segment display, set brightness, clear
   mLedControl.shutdown(0, false);
@@ -136,12 +134,18 @@ int processSetUnits()
 {
   byte buttonState = readButtonState();
   
-  if (checkButtonState(buttonState, SELECT_BUTTON_PIN, BUTTON_PRESSED))
+  if (checkButtonState(
+          buttonState,
+          PIN_BUTTON_SELECT,
+          MASK_BUTTON_PRESSED))
   {
     return STATE_SET_TEMP_INT;
   }
-  else if (checkButtonState(buttonState, LEFT_BUTTON_PIN, BUTTON_PRESSED)
-      || checkButtonState(buttonState, RIGHT_BUTTON_PIN, BUTTON_PRESSED))
+  else if (
+      checkButtonState(
+          buttonState, PIN_BUTTON_LEFT, MASK_BUTTON_PRESSED)
+      || checkButtonState(
+          buttonState, PIN_BUTTON_RIGHT, MASK_BUTTON_PRESSED))
   {
     Serial.println("toggle!");
     mIsCelsius = !mIsCelsius;
@@ -470,15 +474,15 @@ byte readButtonState()
       mLastDebounceTime[i] = now;
     }
     
-    if ((now - mLastDebounceTime[i]) > DEBOUNCE_DELAY_MS)
+    if ((now - mLastDebounceTime[i]) > DELAY_MS_DEBOUNCE)
     {
       if (reading != mButtonState[i])
       {
         mButtonState[i] = reading;
         
-        if (mButtonState[i] == HIGH)
+        if (mButtonState[i] == LOW)
         {
-          state |= (BUTTON_PRESSED << (i * 2));
+          state |= (MASK_BUTTON_PRESSED << (i * 2));
           mButtonDownSince[i] = now;
         }
         else
@@ -486,11 +490,11 @@ byte readButtonState()
           // state is already zero
         }
       }
-      else if (now - mButtonDownSince[i] > LONG_PRESS_DELAY_MS)
+      else if (now - mButtonDownSince[i] > DELAY_MS_LONG_PRESS)
       {
-        if (mButtonState[i] == HIGH)
+        if (mButtonState[i] == LOW)
         {
-          state |= (BUTTON_LONG_PRESSED << (i * 2));
+          state |= (MASK_BUTTON_LONG_PRESSED << (i * 2));
         }
       }
     }
@@ -506,11 +510,11 @@ byte getPinNumber(byte i)
   switch (i)
   {
     case 0:
-      return LEFT_BUTTON_PIN;
+      return PIN_BUTTON_LEFT;
     case 1:
-      return RIGHT_BUTTON_PIN;
+      return PIN_BUTTON_RIGHT;
     case 2:
-      return SELECT_BUTTON_PIN;
+      return PIN_BUTTON_SELECT;
   }
 }
 
@@ -520,13 +524,13 @@ boolean checkButtonState(byte state, byte pin, byte mask)
   
   switch (pin)
   {
-    case LEFT_BUTTON_PIN:
+    case PIN_BUTTON_LEFT:
       shift = 0;
       break;
-    case RIGHT_BUTTON_PIN:
+    case PIN_BUTTON_RIGHT:
       shift = 1;
       break;
-    case SELECT_BUTTON_PIN:
+    case PIN_BUTTON_SELECT:
       shift = 2;
       break;
     default:
@@ -691,8 +695,8 @@ void displayReadTemp()
 
 void blinkDigit(int row, byte value, bool showPoint)
 {
-  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
-  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
+  int offsetInPeriod = millis() % PERIOD_MS_FLASH;
+  if (offsetInPeriod == (offsetInPeriod % (PERIOD_MS_FLASH >> 1)))
   {
     mLedControl.setDigit(0, row, value, showPoint);
   }
@@ -704,8 +708,8 @@ void blinkDigit(int row, byte value, bool showPoint)
 }
 void blinkChar(int row, byte value)
 {
-  int offsetInPeriod = millis() % FLASH_PERIOD_MS;
-  if (offsetInPeriod == (offsetInPeriod % (FLASH_PERIOD_MS >> 1)))
+  int offsetInPeriod = millis() % PERIOD_MS_FLASH;
+  if (offsetInPeriod == (offsetInPeriod % (PERIOD_MS_FLASH >> 1)))
   {
     mLedControl.setRow(0, row, value);
   }
