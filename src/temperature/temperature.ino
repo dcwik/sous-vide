@@ -56,17 +56,18 @@
 #define ERROR_OWB_SCRATCHPAD_WRITE_CRC   6
 #define ERROR_OWB_NOT_EXTERNALLY_POWERED 7
 
-#define STATE_SET_UNITS    0
-#define STATE_SET_TEMP_INT 1
-#define STATE_READ_TEMP    2
-#define STATE_ERROR        3
+#define STATE_SET_UNITS     0
+#define STATE_SET_TEMP_INT  1
+#define STATE_SET_TEMP_FRAC 2
+#define STATE_READ_TEMP     3
+#define STATE_ERROR         4
 
 #define DELAY_MS_DEBOUNCE     50
-#define DELAY_MS_LONG_PRESS 2000
+#define DELAY_MS_LONG_PRESS  480
 #define PERIOD_MS_FLASH     1000
 
 #define MASK_BUTTON_PRESSED      0x01
-#define MASK_BUTTON_LONG_PRESSED 0x10
+#define MASK_BUTTON_LONG_PRESSED 0x02
 
 #define C_TO_F(x) ((x * 9 / 5) + 32)
 
@@ -113,6 +114,8 @@ long mLastDebounceTime[3];
 
 // time since last button state went HIGH
 long mButtonDownSince[3];
+
+long mLastBlinkTime = 0;
 
 void setup(void)
 {
@@ -207,6 +210,7 @@ int processSetUnits()
   {
     // toggle between F and C if left or right is pressed
     mDisplayInCelsius = !mDisplayInCelsius;
+    onInput();
   }
   
   // stay in same state
@@ -229,6 +233,7 @@ int processSetTempInt()
   {
     // decrease temp
     changeSetTempInt(-1);
+    onInput();
   }
   else if (checkButtonState(
           buttonState,
@@ -237,6 +242,7 @@ int processSetTempInt()
   {
     // increase temp
     changeSetTempInt(1);
+    onInput();
   }
             
   return STATE_SET_TEMP_INT;
@@ -746,7 +752,7 @@ void showTemperature(int sensorReading)
   mLedControl.setRow(0, 6,
       isNegative && hundreds != 0 ? LED_CHAR_MINUS : 0);
   
-  // print hundreds of celsius if its there
+  // print hundreds of celsius if it's there
   if (hundreds != 0)
   {
     mLedControl.setDigit(0, 5, hundreds, false);
@@ -810,8 +816,7 @@ void displayReadTemp()
 
 void blinkDigit(int row, byte value, bool showPoint)
 {
-  int offsetInPeriod = millis() % PERIOD_MS_FLASH;
-  if (offsetInPeriod == (offsetInPeriod % (PERIOD_MS_FLASH >> 1)))
+  if (shouldBlinkOn())
   {
     mLedControl.setDigit(0, row, value, showPoint);
   }
@@ -821,10 +826,10 @@ void blinkDigit(int row, byte value, bool showPoint)
     mLedControl.setRow(0, row, showPoint ? LED_CHAR_DOT : 0);
   }
 }
+
 void blinkChar(int row, byte value)
 {
-  int offsetInPeriod = millis() % PERIOD_MS_FLASH;
-  if (offsetInPeriod == (offsetInPeriod % (PERIOD_MS_FLASH >> 1)))
+  if (shouldBlinkOn())
   {
     mLedControl.setRow(0, row, value);
   }
@@ -833,6 +838,17 @@ void blinkChar(int row, byte value)
     // clear out digit (for blink effect)
     mLedControl.setRow(0, row, 0);
   }
+}
+
+boolean shouldBlinkOn()
+{
+  int offsetInPeriod = (millis() - mLastBlinkTime) % PERIOD_MS_FLASH;
+  return offsetInPeriod == (offsetInPeriod % (PERIOD_MS_FLASH >> 1));
+}
+
+void onInput()
+{
+  mLastBlinkTime = millis();
 }
 
 void displayError()
