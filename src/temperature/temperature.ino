@@ -93,6 +93,14 @@ int mState;
 
 boolean mDisplayInCelsius;
 
+// the integer portion of the desired temperature, in the
+// units according to mDisplayInCelsius
+int mDesiredTempIntUserUnits;
+
+// the fraction portion of the desired temperature, in the
+// units according to mDisplayInCelsius (eg, 9 --> 0.9)
+byte mDesiredTempFracUserUnits;
+
 // the 2-byte desired temperature reading, in sensor scale,
 // ie, in celsius, << 4 (or 16 times the desired celsius
 // value), to be set in temperature setting state
@@ -161,21 +169,17 @@ int processInputs(int state)
   {
     case STATE_SET_UNITS:
       return processSetUnits();
-      break;
     case STATE_SET_TEMP_INT:
       return processSetTempInt();
-      break;
+    case STATE_SET_TEMP_FRAC:
+      return processSetTempFrac();
     case STATE_READ_TEMP:
       return processReadTemp();
-      break;
     case STATE_ERROR:
     default:
       break;
   }
 }
-
-int mDesiredTempIntUserUnits;
-byte mDesiredTempFractUserUnits;
 
 /**
  * See if we have the left or right button to change between F
@@ -196,7 +200,7 @@ int processSetUnits()
         ? START_SET_TEMP_C
         : START_SET_TEMP_F;
 
-    mDesiredTempFractUserUnits = 0;
+    mDesiredTempFracUserUnits = 0;
     
     // move to setting integer part of the temperature since
     // select was pressed
@@ -227,18 +231,27 @@ int processSetTempInt()
   byte buttonState = readButtonState();
   
   if (checkButtonState(
-          buttonState,
-          PIN_BUTTON_LEFT,
-          MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
+      buttonState,
+      PIN_BUTTON_SELECT,
+      MASK_BUTTON_PRESSED))
+  {
+    // move on to setting the fractional part
+    return STATE_SET_TEMP_FRAC;
+  }
+  
+  if (checkButtonState(
+      buttonState,
+      PIN_BUTTON_LEFT,
+      MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
   {
     // decrease temp
     changeSetTempInt(-1);
     onInput();
   }
   else if (checkButtonState(
-          buttonState,
-          PIN_BUTTON_RIGHT,
-          MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
+      buttonState,
+      PIN_BUTTON_RIGHT,
+      MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
   {
     // increase temp
     changeSetTempInt(1);
@@ -254,6 +267,93 @@ void changeSetTempInt(int amount)
     mDesiredTempIntUserUnits + amount,
     mDisplayInCelsius ? MIN_SET_TEMP_C : MIN_SET_TEMP_F,
     mDisplayInCelsius ? MAX_SET_TEMP_C : MAX_SET_TEMP_F);
+}
+
+int processSetTempFrac()
+{
+  byte buttonState = readButtonState();
+  
+  if (checkButtonState(
+      buttonState,
+      PIN_BUTTON_SELECT,
+      MASK_BUTTON_PRESSED))
+  {
+    // convert the set temperature into the "sensor reading scale",
+    // ie, in Celsius and 16 larger.
+    // move on to temperature controlling
+    if (mDisplayInCelsius)
+    {
+      // make sure the fractional part rounds to the nearest 1/16
+      // of a degree, rather than doing integer division (eg,
+      // 85.5C * 16 = 1372.8, let's round that to 1373 in "sensor
+      // reading scale")
+      mDesiredSensorReading = (mDesiredTempIntUserUnits << 4)
+          + round((mDesiredTempFracUserUnits << 4) / (float) 10);
+          
+
+    }
+    else
+    {
+      //   tc = (tf - 32) * (5/9);
+      // 16tc = 16((tf - 32) * (5/9))
+      //      = (tf - 32) * (5 * 16) / 9
+      //      = (tf - 32) * 80 / 9
+      //      = (80tf - 2560) / 9
+      // 
+      // but tf = tf(int) + tf(frac)/10 (since we're keeping track
+      //                                 of the fraction part as an
+      //                                 integer)
+      //
+      // 16tc = (80(tf(int) + tf(frac)/10) - 2560) / 9
+      //      = (80tf(int) + 8tf(frac) - 2560) / 9
+      mDesiredSensorReading = round(
+          ((80 * mDesiredTempIntUserUnits) +
+          (8 * mDesiredTempFracUserUnits) -
+          2560) / (float) 9);
+    }
+    
+    if (DEBUG)
+    {
+      Serial.print("Desired: ");
+      Serial.print(mDesiredTempIntUserUnits);
+      Serial.print('.');
+      Serial.print(mDesiredTempFracUserUnits);
+      Serial.println(mDisplayInCelsius ? 'C' : 'F');
+      Serial.print("16 * tc: ");
+      Serial.println(mDesiredSensorReading);
+    }
+    
+    // zero out the unit-less variables so we don't accidentally
+    // use them
+    mDesiredTempIntUserUnits = 0;
+    mDesiredTempFracUserUnits = 0;
+    
+
+    // TODO move to next state
+    return STATE_READ_TEMP;
+  }
+  if (checkButtonState(
+      buttonState,
+      PIN_BUTTON_LEFT,
+      MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
+  {
+    // decrease temp (+9 is the same as -1, but avoiding any
+    // unexpected negative issues with modulo)
+    mDesiredTempFracUserUnits = (mDesiredTempFracUserUnits + 9) % 10;
+    onInput();
+  }
+  else if (checkButtonState(
+      buttonState,
+      PIN_BUTTON_RIGHT,
+      MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
+  {
+    // decrease temp (+9 is the same as -1, but avoiding any
+    // unexpected negative issues with modulo)
+    mDesiredTempFracUserUnits = (mDesiredTempFracUserUnits + 1) % 10;
+    onInput();
+  }
+            
+  return STATE_SET_TEMP_FRAC;
 }
 
 int processReadTemp()
@@ -343,6 +443,9 @@ void display(int state)
       break;
     case STATE_SET_TEMP_INT:
       displaySetTempInt();
+      break;
+    case STATE_SET_TEMP_FRAC:
+      displaySetTempFrac();
       break;
     case STATE_READ_TEMP:
       displayReadTemp();
@@ -786,9 +889,6 @@ void displayUnits()
 
 void displaySetTempInt()
 {
-  //showTemperature(mDesiredSensorReading);
-  //return;
-  
   int hundreds = mDesiredTempIntUserUnits / 100;
   int tens = (mDesiredTempIntUserUnits % 100) / 10;
   int ones = mDesiredTempIntUserUnits % 10;
@@ -805,6 +905,38 @@ void displaySetTempInt()
   
   // don't blink the fraction, show C/F
   mLedControl.setDigit(0, 1, 0, false);
+  mLedControl.setRow(0, 0,
+      mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
+}
+
+void displaySetTempFrac()
+{
+  int hundreds = mDesiredTempIntUserUnits / 100;
+  int tens = (mDesiredTempIntUserUnits % 100) / 10;
+  int ones = mDesiredTempIntUserUnits % 10;
+  
+  // empty out the first 3 digits
+  mLedControl.setRow(0, 7, 0);
+  mLedControl.setRow(0, 6, 0);
+  mLedControl.setRow(0, 5, 0);
+  
+  // show integer part (not blinking)
+  if (hundreds != 0)
+  {
+    mLedControl.setDigit(0, 4, hundreds, false);
+  }
+  else
+  {
+    // blank
+    mLedControl.setRow(0, 4, 0);
+  }
+  mLedControl.setDigit(0, 3, tens, false);
+  mLedControl.setDigit(0, 2, ones, true);
+  
+  // show blinking fractoin
+  blinkDigit(1, mDesiredTempFracUserUnits, false);
+  
+  // and finally the C/F
   mLedControl.setRow(0, 0,
       mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
