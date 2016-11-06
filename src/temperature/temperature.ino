@@ -68,9 +68,14 @@
 #define MASK_BUTTON_PRESSED      0x01
 #define MASK_BUTTON_LONG_PRESSED 0x10
 
-#define MAX_DESIRED_SENSOR_READING 99 << 4
-#define STARTING_DESIRED_SENSOR_READING 60 << 4 // 140F, "safe"
-#define MIN_DESIRED_SENSOR_READING 25 << 4
+#define C_TO_F(x) ((x * 9 / 5) + 32)
+
+#define MAX_SET_TEMP_C   99
+#define START_SET_TEMP_C 60
+#define MIN_SET_TEMP_C   25
+#define MAX_SET_TEMP_F   C_TO_F(MAX_SET_TEMP_C)
+#define START_SET_TEMP_F C_TO_F(START_SET_TEMP_C)
+#define MIN_SET_TEMP_F   C_TO_F(MIN_SET_TEMP_C)
 
 // create the 1-wire bus
 OneWire ds(PIN_ONE_WIRE_BUS);
@@ -89,8 +94,8 @@ boolean mDisplayInCelsius;
 
 // the 2-byte desired temperature reading, in sensor scale,
 // ie, in celsius, << 4 (or 16 times the desired celsius
-// value)
-int mDesiredSensorReading = STARTING_DESIRED_SENSOR_READING;
+// value), to be set in temperature setting state
+int mDesiredSensorReading = 0;
 
 // the 2-byte temperature reading from the sensor
 int mActualSensorReading = 0;
@@ -166,6 +171,9 @@ int processInputs(int state)
   }
 }
 
+int mDesiredTempIntUserUnits;
+byte mDesiredTempFractUserUnits;
+
 /**
  * See if we have the left or right button to change between F
  * and C, or the select button to move us into setting the
@@ -180,6 +188,13 @@ int processSetUnits()
           PIN_BUTTON_SELECT,
           MASK_BUTTON_PRESSED))
   {
+    // set the starting default temperature
+    mDesiredTempIntUserUnits = mDisplayInCelsius
+        ? START_SET_TEMP_C
+        : START_SET_TEMP_F;
+
+    mDesiredTempFractUserUnits = 0;
+    
     // move to setting integer part of the temperature since
     // select was pressed
     return STATE_SET_TEMP_INT;
@@ -210,43 +225,29 @@ int processSetTempInt()
   if (checkButtonState(
           buttonState,
           PIN_BUTTON_LEFT,
-          MASK_BUTTON_PRESSED))
+          MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
   {
     // decrease temp
-    mDesiredSensorReading =
-        constrain(
-          mDesiredSensorReading - (1 << 4),
-          MIN_DESIRED_SENSOR_READING,
-          MAX_DESIRED_SENSOR_READING);
+    changeSetTempInt(-1);
   }
   else if (checkButtonState(
           buttonState,
           PIN_BUTTON_RIGHT,
-          MASK_BUTTON_LONG_PRESSED))
-  {
-    // decrease temp fast
-  }
-  else if (checkButtonState(
-          buttonState,
-          PIN_BUTTON_RIGHT,
-          MASK_BUTTON_PRESSED))
+          MASK_BUTTON_PRESSED | MASK_BUTTON_LONG_PRESSED))
   {
     // increase temp
-    mDesiredSensorReading =
-        constrain(
-          mDesiredSensorReading + (1 << 4),
-          MIN_DESIRED_SENSOR_READING,
-          MAX_DESIRED_SENSOR_READING);
-  }
-  else if (checkButtonState(
-          buttonState,
-          PIN_BUTTON_RIGHT,
-          MASK_BUTTON_LONG_PRESSED))
-  {
-    // increase temp fast
+    changeSetTempInt(1);
   }
             
   return STATE_SET_TEMP_INT;
+}
+
+void changeSetTempInt(int amount)
+{
+  mDesiredTempIntUserUnits = constrain(
+    mDesiredTempIntUserUnits + amount,
+    mDisplayInCelsius ? MIN_SET_TEMP_C : MIN_SET_TEMP_F,
+    mDisplayInCelsius ? MAX_SET_TEMP_C : MAX_SET_TEMP_F);
 }
 
 int processReadTemp()
@@ -641,16 +642,20 @@ void printHex(byte b)
 
 void showTemperature(int sensorReading)
 {
+  int readingInScale = mDisplayInCelsius
+      ? sensorReading
+      : ((sensorReading * 9 / 5) + (32 << 4));
+
   // On the DS18B20, the 12th through the 16th bit are the sign
   // bits. We'll only check the 16th bit to see if it's negative,
   // ie, the binary number matches 1xxx xxxx xxxx xxxx.
-  boolean isNegative = (sensorReading & 0x8000) != 0;
+  boolean isNegative = (readingInScale & 0x8000) != 0;
   
   if (isNegative)
   {
     // for 2's complement, flip all bits and add 1 to convert from
     // negative to postive
-    sensorReading = (sensorReading ^ 0xffff) + 1;
+    readingInScale = (readingInScale ^ 0xffff) + 1;
   }
   
   // At this point, we've forced sensorReading to be a positive,
@@ -697,7 +702,7 @@ void showTemperature(int sensorReading)
 
   // To get the whole part of the temperature, divide by 16
   // (which is the same as bit shifting to the right by 4).
-  int wholeCelsius = sensorReading >> 4;
+  int wholeCelsius = readingInScale >> 4;
   
   // The fractional part of the temperature is represented by the
   // last 4 bits, so grab those (by masking with
@@ -716,7 +721,7 @@ void showTemperature(int sensorReading)
   // numbers (the 1's get pushed out)! To prevent this, we must
   // FIRST multiply by 100, THEN bit shift, ending up with 75 as
   // the "fractional part".
-  int fractCelsius = ((sensorReading & 0x000F) * 100) >> 4;
+  int fractCelsius = ((readingInScale & 0x000F) * 100) >> 4;
   
   if (DEBUG)
   {
@@ -738,22 +743,25 @@ void showTemperature(int sensorReading)
 
   mLedControl.setRow(0, 7, 0); // blank
 
-  if (isNegative && hundreds != 0)
-  {
-    mLedControl.setRow(0, 6, LED_CHAR_MINUS);
-  }
+  mLedControl.setRow(0, 6,
+      isNegative && hundreds != 0 ? LED_CHAR_MINUS : 0);
   
   // print hundreds of celsius if its there
   if (hundreds != 0)
   {
     mLedControl.setDigit(0, 5, hundreds, false);
   }
+  else
+  {
+    mLedControl.setRow(0, 5, isNegative ? LED_CHAR_MINUS : 0);
+  }
   
   mLedControl.setDigit(0, 4, tens, false);
   mLedControl.setDigit(0, 3, ones, true);
   mLedControl.setDigit(0, 2, tenths, false);
   mLedControl.setDigit(0, 1, hundreths, false);
-  mLedControl.setRow(0, 0, LED_CHAR_C); // "C"
+  mLedControl.setRow(0, 0,
+      mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
 void displayUnits()
@@ -772,18 +780,27 @@ void displayUnits()
 
 void displaySetTempInt()
 {
-  showTemperature(mDesiredSensorReading);
-  return;
+  //showTemperature(mDesiredSensorReading);
+  //return;
   
-  blinkDigit(7, 0, false);
-  blinkDigit(6, 0, false);
-  blinkDigit(5, 0, false);
-  blinkDigit(4, 0, true);
-  mLedControl.setDigit(0, 3, 0, false);
-  mLedControl.setDigit(0, 2, 0, false);
+  int hundreds = mDesiredTempIntUserUnits / 100;
+  int tens = (mDesiredTempIntUserUnits % 100) / 10;
+  int ones = mDesiredTempIntUserUnits % 10;
+  
+  // empty out the first 3 digits
+  mLedControl.setRow(0, 7, 0);
+  mLedControl.setRow(0, 6, 0);
+  mLedControl.setRow(0, 5, 0);
+  
+  // blink the integer part of the temp, with a '.' at the end
+  blinkDigit(4, hundreds, false);
+  blinkDigit(3, tens, false);
+  blinkDigit(2, ones, true);
+  
+  // don't blink the fraction, show C/F
   mLedControl.setDigit(0, 1, 0, false);
-  mLedControl.setRow(
-      0, 0, mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
+  mLedControl.setRow(0, 0,
+      mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
 void displayReadTemp()
