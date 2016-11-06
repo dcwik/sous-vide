@@ -36,6 +36,7 @@
 #define LED_CHAR_T      0x0F
 #define LED_CHAR_U      0x1C
 #define LED_CHAR_DOT    0x80
+#define LED_CHAR_MINUS  0x01
 #define LED_CHAR_Q_MARK 0x65
 
 // 1-wire bus commands
@@ -67,6 +68,10 @@
 #define MASK_BUTTON_PRESSED      0x01
 #define MASK_BUTTON_LONG_PRESSED 0x10
 
+#define MAX_DESIRED_SENSOR_READING 99 << 4
+#define STARTING_DESIRED_SENSOR_READING 60 << 4 // 140F, "safe"
+#define MIN_DESIRED_SENSOR_READING 25 << 4
+
 // create the 1-wire bus
 OneWire ds(PIN_ONE_WIRE_BUS);
 
@@ -80,15 +85,40 @@ LedControl mLedControl = LedControl(
 // consider byte?
 int mState;
 
-// the 2-byte temperature reading from the sensor
-int mSensorReading;
+boolean mDisplayInCelsius;
 
-boolean mIsCelsius;
+// the 2-byte desired temperature reading, in sensor scale,
+// ie, in celsius, << 4 (or 16 times the desired celsius
+// value)
+int mDesiredSensorReading = STARTING_DESIRED_SENSOR_READING;
+
+// the 2-byte temperature reading from the sensor
+int mActualSensorReading = 0;
+
+long mLastTempReadTime = 0;
+
+// current button reading, bouncy
+int mButtonState[3];
+
+// the debounced state
+int mLastButtonState[3];
+
+// the last time the state changed/bounced
+long mLastDebounceTime[3];
+
+// time since last button state went HIGH
+long mButtonDownSince[3];
 
 void setup(void)
 {
   Serial.begin(9600);
   
+  // Set button pins to INPUT_PULLUP, meaning each pin is
+  // connected to Vin (5V) via a 20K Ohm resistor. With the
+  // button normally opened, each pin remains HIGH. When
+  // the button is closed, current will draw to the ground
+  // of the button, all voltage is dropped across the
+  // resistor, and the pin will read LOW
   pinMode(PIN_BUTTON_LEFT, INPUT_PULLUP);
   pinMode(PIN_BUTTON_RIGHT, INPUT_PULLUP);
   pinMode(PIN_BUTTON_SELECT, INPUT_PULLUP);
@@ -100,17 +130,23 @@ void setup(void)
   
   // start in temperature setting mode
   mState = STATE_SET_UNITS;
-  mSensorReading = 0;
-  mIsCelsius = true;
+  mActualSensorReading = 0;
+  
+  mDisplayInCelsius = true;
 }
 
 void loop(void)
 {
   mState = processInputs(mState);
-  
   display(mState);
+  
+  delay(100);
 }
 
+/**
+ * Synchronously read inputs, see if the state changed. There
+ * Should be no delays in any of the process methods.
+ */
 int processInputs(int state)
 {
   switch (state)
@@ -130,6 +166,11 @@ int processInputs(int state)
   }
 }
 
+/**
+ * See if we have the left or right button to change between F
+ * and C, or the select button to move us into setting the
+ * integer value of the temperature.
+ */
 int processSetUnits()
 {
   byte buttonState = readButtonState();
@@ -139,6 +180,8 @@ int processSetUnits()
           PIN_BUTTON_SELECT,
           MASK_BUTTON_PRESSED))
   {
+    // move to setting integer part of the temperature since
+    // select was pressed
     return STATE_SET_TEMP_INT;
   }
   else if (
@@ -147,19 +190,64 @@ int processSetUnits()
       || checkButtonState(
           buttonState, PIN_BUTTON_RIGHT, MASK_BUTTON_PRESSED))
   {
-    Serial.println("toggle!");
-    mIsCelsius = !mIsCelsius;
+    // toggle between F and C if left or right is pressed
+    mDisplayInCelsius = !mDisplayInCelsius;
   }
   
+  // stay in same state
   return STATE_SET_UNITS;
 }
 
+/**
+ * See if we have the left or right button pressed to change the
+ * integer value of the temperature, or the select button to move
+ * into setting the fractional part of the temperature.
+ */
 int processSetTempInt()
 {
+  byte buttonState = readButtonState();
+  
+  if (checkButtonState(
+          buttonState,
+          PIN_BUTTON_LEFT,
+          MASK_BUTTON_PRESSED))
+  {
+    // decrease temp
+    mDesiredSensorReading =
+        constrain(
+          mDesiredSensorReading - (1 << 4),
+          MIN_DESIRED_SENSOR_READING,
+          MAX_DESIRED_SENSOR_READING);
+  }
+  else if (checkButtonState(
+          buttonState,
+          PIN_BUTTON_RIGHT,
+          MASK_BUTTON_LONG_PRESSED))
+  {
+    // decrease temp fast
+  }
+  else if (checkButtonState(
+          buttonState,
+          PIN_BUTTON_RIGHT,
+          MASK_BUTTON_PRESSED))
+  {
+    // increase temp
+    mDesiredSensorReading =
+        constrain(
+          mDesiredSensorReading + (1 << 4),
+          MIN_DESIRED_SENSOR_READING,
+          MAX_DESIRED_SENSOR_READING);
+  }
+  else if (checkButtonState(
+          buttonState,
+          PIN_BUTTON_RIGHT,
+          MASK_BUTTON_LONG_PRESSED))
+  {
+    // increase temp fast
+  }
+            
   return STATE_SET_TEMP_INT;
 }
-
-long mLastReadTemp = 0;
 
 int processReadTemp()
 {
@@ -199,12 +287,12 @@ int processReadTemp()
   long now = millis();
   
   // break out early if we've read recently
-  if (now - mLastReadTemp < 2000)
+  if (now - mLastTempReadTime < 2000)
   {
     return STATE_READ_TEMP;
   }
   
-  mLastReadTemp = now;
+  mLastTempReadTime = now;
   
   // query the DS18B20, write into data
   result = querySensor(addr, data);
@@ -234,7 +322,7 @@ int processReadTemp()
   
   // first 2 bytes read are the temperature data, with the first
   // byte being the least significant bits
-  mSensorReading = (data[1] << 8) | data[0];
+  mActualSensorReading = (data[1] << 8) | data[0];
   
   return STATE_READ_TEMP;
 }
@@ -453,11 +541,6 @@ void printHexBytes(byte *bytes, int len)
   }
 }
 
-int mButtonState[3];
-int mLastButtonState[3];
-long mLastDebounceTime[3];
-long mButtonDownSince[3];
-
 byte readButtonState()
 {
   byte state = 0;
@@ -647,19 +730,30 @@ void showTemperature(int sensorReading)
     Serial.println(" C");
   }
   
-  if (wholeCelsius < 100)
-  {
-    int tens = wholeCelsius / 10;
-    int ones = wholeCelsius % 10;
-    int tenths = fractCelsius / 10;
-    int hundreths = fractCelsius % 10;
+  int hundreds = wholeCelsius / 100;
+  int tens = (wholeCelsius % 100) / 10;
+  int ones = wholeCelsius % 10;
+  int tenths = fractCelsius / 10;
+  int hundreths = fractCelsius % 10;
 
-    mLedControl.setDigit(0, 7, tens, false);
-    mLedControl.setDigit(0, 6, ones, true);
-    mLedControl.setDigit(0, 5, tenths, false);
-    mLedControl.setDigit(0, 4, hundreths, false);
-    mLedControl.setRow(0, 3, LED_CHAR_C); // "C"
+  mLedControl.setRow(0, 7, 0); // blank
+
+  if (isNegative && hundreds != 0)
+  {
+    mLedControl.setRow(0, 6, LED_CHAR_MINUS);
   }
+  
+  // print hundreds of celsius if its there
+  if (hundreds != 0)
+  {
+    mLedControl.setDigit(0, 5, hundreds, false);
+  }
+  
+  mLedControl.setDigit(0, 4, tens, false);
+  mLedControl.setDigit(0, 3, ones, true);
+  mLedControl.setDigit(0, 2, tenths, false);
+  mLedControl.setDigit(0, 1, hundreths, false);
+  mLedControl.setRow(0, 0, LED_CHAR_C); // "C"
 }
 
 void displayUnits()
@@ -673,11 +767,14 @@ void displayUnits()
   mLedControl.setRow(0, 2, 0);
   mLedControl.setRow(0, 1, 0);
   
-  blinkChar(0, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
+  blinkChar(0, mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
 void displaySetTempInt()
 {
+  showTemperature(mDesiredSensorReading);
+  return;
+  
   blinkDigit(7, 0, false);
   blinkDigit(6, 0, false);
   blinkDigit(5, 0, false);
@@ -685,12 +782,13 @@ void displaySetTempInt()
   mLedControl.setDigit(0, 3, 0, false);
   mLedControl.setDigit(0, 2, 0, false);
   mLedControl.setDigit(0, 1, 0, false);
-  mLedControl.setRow(0, 0, mIsCelsius ? LED_CHAR_C : LED_CHAR_F);
+  mLedControl.setRow(
+      0, 0, mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
 void displayReadTemp()
 {
-  showTemperature(mSensorReading);
+  showTemperature(mActualSensorReading);
 }
 
 void blinkDigit(int row, byte value, bool showPoint)
