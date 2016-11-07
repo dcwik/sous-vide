@@ -26,12 +26,14 @@
 #define PIN_BUTTON_LEFT   2
 #define PIN_BUTTON_RIGHT  8
 #define PIN_BUTTON_SELECT 4
+#define PIN_RELAY        13
 
 #define LED_CHAR_C      0x4E
 #define LED_CHAR_E      0x4F
 #define LED_CHAR_F      0x47
 #define LED_CHAR_I      0x04
 #define LED_CHAR_N      0x15
+#define LED_CHAR_O      0x1D
 #define LED_CHAR_R      0x05
 #define LED_CHAR_T      0x0F
 #define LED_CHAR_U      0x1C
@@ -128,6 +130,9 @@ long mLastBlinkTime = 0;
 void setup(void)
 {
   Serial.begin(9600);
+  
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_RELAY, LOW);
   
   // Set button pins to INPUT_PULLUP, meaning each pin is
   // connected to Vin (5V) via a 20K Ohm resistor. With the
@@ -328,8 +333,8 @@ int processSetTempFrac()
     mDesiredTempIntUserUnits = 0;
     mDesiredTempFracUserUnits = 0;
     
-
-    // TODO move to next state
+    digitalWrite(PIN_RELAY, HIGH);
+    
     return STATE_READ_TEMP;
   }
   if (checkButtonState(
@@ -988,8 +993,11 @@ void displayError()
   mLedControl.setRow(0, 7, LED_CHAR_E);
   mLedControl.setRow(0, 6, LED_CHAR_R);
   mLedControl.setRow(0, 5, LED_CHAR_R);
-  mLedControl.setRow(0, 4, 0);
+  mLedControl.setRow(0, 4, LED_CHAR_O);
   mLedControl.setRow(0, 3, LED_CHAR_R);
+  mLedControl.setRow(0, 2, 0);
+  mLedControl.setRow(0, 1, 0);
+  mLedControl.setRow(0, 0, 0);
 }
 
 void showError(int errorCode)
