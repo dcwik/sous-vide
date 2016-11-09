@@ -50,19 +50,21 @@
 
 // error codes
 #define NO_ERROR                         0
-#define ERROR_OWB_NO_DEVICES             1
-#define ERROR_OWB_TOO_MANY_DEVICES       2
-#define ERROR_OWB_ADDRESS_CRC            3
-#define ERROR_OWB_NOT_28_FAMILY          4
-#define ERROR_OWB_SCRATCHPAD_READ_CRC    5
-#define ERROR_OWB_SCRATCHPAD_WRITE_CRC   6
-#define ERROR_OWB_NOT_EXTERNALLY_POWERED 7
+#define STILL_CONVERTING                 1
+#define ERROR_OWB_NO_DEVICES             2
+#define ERROR_OWB_TOO_MANY_DEVICES       3
+#define ERROR_OWB_ADDRESS_CRC            4
+#define ERROR_OWB_NOT_28_FAMILY          5
+#define ERROR_OWB_SCRATCHPAD_READ_CRC    6
+#define ERROR_OWB_SCRATCHPAD_WRITE_CRC   7
+#define ERROR_OWB_NOT_EXTERNALLY_POWERED 8
 
-#define STATE_SET_UNITS     0
-#define STATE_SET_TEMP_INT  1
-#define STATE_SET_TEMP_FRAC 2
-#define STATE_READ_TEMP     3
-#define STATE_ERROR         4
+#define STATE_SET_UNITS       0
+#define STATE_SET_TEMP_INT    1
+#define STATE_SET_TEMP_FRAC   2
+#define STATE_READ_TEMP_START 3
+#define STATE_READ_TEMP_WAIT  4
+#define STATE_ERROR           5
 
 #define DELAY_MS_DEBOUNCE     50
 #define DELAY_MS_LONG_PRESS  480
@@ -178,10 +180,13 @@ int processInputs(int state)
       return processSetTempInt();
     case STATE_SET_TEMP_FRAC:
       return processSetTempFrac();
-    case STATE_READ_TEMP:
-      return processReadTemp();
+    case STATE_READ_TEMP_START:
+      return processReadTempStart();
+    case STATE_READ_TEMP_WAIT:
+      return processReadTempWait();
     case STATE_ERROR:
     default:
+      return processError();
       break;
   }
 }
@@ -206,6 +211,9 @@ int processSetUnits()
         : START_SET_TEMP_F;
 
     mDesiredTempFracUserUnits = 0;
+    
+    Serial.print("units set as ");
+    Serial.println(mDisplayInCelsius ? 'C' : 'F');
     
     // move to setting integer part of the temperature since
     // select was pressed
@@ -240,6 +248,10 @@ int processSetTempInt()
       PIN_BUTTON_SELECT,
       MASK_BUTTON_PRESSED))
   {
+
+    Serial.print("Integer temp set as ");
+    Serial.println(mDesiredTempIntUserUnits);
+    
     // move on to setting the fractional part
     return STATE_SET_TEMP_FRAC;
   }
@@ -283,6 +295,9 @@ int processSetTempFrac()
       PIN_BUTTON_SELECT,
       MASK_BUTTON_PRESSED))
   {
+    Serial.print("Fraction temperature set as 0.");
+    Serial.println(mDesiredTempFracUserUnits);
+    
     // convert the set temperature into the "sensor reading scale",
     // ie, in Celsius and 16 larger.
     // move on to temperature controlling
@@ -333,10 +348,13 @@ int processSetTempFrac()
     mDesiredTempIntUserUnits = 0;
     mDesiredTempFracUserUnits = 0;
     
+    // TODO don't do this
     digitalWrite(PIN_RELAY, HIGH);
     
-    return STATE_READ_TEMP;
+    Serial.println("Attempting to read temperature");
+    return STATE_READ_TEMP_START;
   }
+  
   if (checkButtonState(
       buttonState,
       PIN_BUTTON_LEFT,
@@ -361,57 +379,76 @@ int processSetTempFrac()
   return STATE_SET_TEMP_FRAC;
 }
 
-int processReadTemp()
+byte mTempState;
+long mLastReadTempTime;
+
+// we only ever read the first 9 bytes from the Scratchpad
+byte data[9];
+
+// 8 byte address for devices on the 1-wire bus
+byte addr[8];
+
+int processReadTempStart()
 {
-  // we only ever read the first 9 bytes from the Scratchpad
-  byte data[9];
+  int result = findSingleDevice(addr);
   
-  // 8 byte address for devices on the 1-wire bus
-  byte addr[8];
-  
-  int result;
-  
-  result = findSingleDevice(addr);
   if (result != NO_ERROR)
   {
-    showError(result);
-    delay(5000);
+    Serial.println("Could not find a single device");
     return STATE_ERROR;
   }
-  
-  // print out the device's unique address
+
   if (DEBUG)
   {
+    // print out the device's unique address
     Serial.print("addr=");
     printHexBytes(addr, 8);
     Serial.println();
   }
   
-  // ensure the device is powered externally
+  // ensure the device is powered externally (otherwise we
+  // cannot query the device to ask if it's done its convert 
+  // T)
   result = verifyExternallyPowered(addr);
+  
   if (result != NO_ERROR)
   {
-    showError(result);
-    delay(5000);
+    Serial.println("Could not verify device externally powered");
     return STATE_ERROR;
   }
-  
+
   long now = millis();
   
   // break out early if we've read recently
   if (now - mLastTempReadTime < 2000)
   {
-    return STATE_READ_TEMP;
+    return STATE_READ_TEMP_START;
   }
   
   mLastTempReadTime = now;
   
   // query the DS18B20, write into data
-  result = querySensor(addr, data);
+  result = startQuerySensor(addr);
   if (result != NO_ERROR)
   {
-    showError(result);
-    delay(5000);
+    Serial.println("Failed to start a convert T");
+    return STATE_ERROR;
+  }
+  
+  return STATE_READ_TEMP_WAIT;
+}
+
+int processReadTempWait()
+{
+  int result = readSensorData(addr, data);
+  
+  if (result == STILL_CONVERTING)
+  {
+    return STATE_READ_TEMP_WAIT;
+  }
+  else if (result != NO_ERROR)
+  {
+    Serial.println("Error reading data from sensor");
     return STATE_ERROR;
   }
   
@@ -427,8 +464,7 @@ int processReadTemp()
   result = validateResolution(addr, data);
   if (result != NO_ERROR)
   {
-    showError(result);
-    delay(5000);
+    Serial.println("Failed to validate resolution after convert T");
     return STATE_ERROR;
   }
   
@@ -436,7 +472,13 @@ int processReadTemp()
   // byte being the least significant bits
   mActualSensorReading = (data[1] << 8) | data[0];
   
-  return STATE_READ_TEMP;
+  return STATE_READ_TEMP_START;
+}
+
+int processError()
+{
+  digitalWrite(PIN_RELAY, LOW);
+  return STATE_ERROR;
 }
 
 void display(int state)
@@ -452,11 +494,17 @@ void display(int state)
     case STATE_SET_TEMP_FRAC:
       displaySetTempFrac();
       break;
-    case STATE_READ_TEMP:
-      displayReadTemp();
+    case STATE_READ_TEMP_START:
+      displayReadTempStart();
+      break;
+    case STATE_READ_TEMP_WAIT:
+      displayReadTempWait();
       break;
     case STATE_ERROR:
+      displayError();
+      break;
     default:
+      Serial.println("Unknown state, " + state);
       displayError();
       break;
   }
@@ -522,7 +570,7 @@ int verifyExternallyPowered(byte *addr)
   return NO_ERROR;
 }
 
-int querySensor(byte *addr, byte *data)
+int startQuerySensor(byte *addr)
 {
   // trigger a Convert T command (ie, get temperature and store it
   // on the DS18B20's Scratchpad memory)
@@ -530,6 +578,11 @@ int querySensor(byte *addr, byte *data)
   ds.select(addr);
   ds.write(COMMAND_CONVERT_T);
   
+  return NO_ERROR;
+}
+
+int readSensorData(byte *addr, byte *data)
+{
   // During a Convert T with an externally powered DS18B20, the
   // device keeps the 1-wire bus low until it is done the convert.
   // This means that we don't have to delay an arbitrary amount
@@ -538,8 +591,14 @@ int querySensor(byte *addr, byte *data)
   // of the bus would have to keep the bus high to power the device
   // and must wait an arbitrary (but long enough) amount of time
   // for the convert to complete.
-  while (ds.read_bit() == 0);
   
+  if (ds.read_bit() == 0)
+  {
+    // not done converting yet
+    return STILL_CONVERTING;
+  }
+  
+  // done converting!
   
   // send read command and read the bytes
   ds.reset();
@@ -663,7 +722,11 @@ byte readButtonState()
 
   for (byte i = 0; i < 3; ++i)
   {
-    reading = digitalRead(getPinNumber(i));
+    byte pinNumber = i == 0
+        ? PIN_BUTTON_LEFT
+        : (i == 1 ? PIN_BUTTON_RIGHT : PIN_BUTTON_SELECT);
+
+    reading = digitalRead(pinNumber);
     
     int now = millis();
     
@@ -701,19 +764,6 @@ byte readButtonState()
   }
   
   return state;
-}
-
-byte getPinNumber(byte i)
-{
-  switch (i)
-  {
-    case 0:
-      return PIN_BUTTON_LEFT;
-    case 1:
-      return PIN_BUTTON_RIGHT;
-    case 2:
-      return PIN_BUTTON_SELECT;
-  }
 }
 
 boolean checkButtonState(byte state, byte pin, byte mask)
@@ -946,7 +996,12 @@ void displaySetTempFrac()
       mDisplayInCelsius ? LED_CHAR_C : LED_CHAR_F);
 }
 
-void displayReadTemp()
+void displayReadTempStart()
+{
+  showTemperature(mActualSensorReading);
+}
+
+void displayReadTempWait()
 {
   showTemperature(mActualSensorReading);
 }
