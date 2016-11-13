@@ -59,6 +59,10 @@
 #define ERROR_OWB_SCRATCHPAD_WRITE_CRC   7
 #define ERROR_OWB_NOT_EXTERNALLY_POWERED 8
 
+#define READ_SENSOR_SUCCESS    0
+#define READ_SENSOR_FAIL       1
+#define READ_SENSOR_PROCESSING 2
+
 #define STATE_SET_UNITS       0
 #define STATE_SET_TEMP_INT    1
 #define STATE_SET_TEMP_FRAC   2
@@ -69,6 +73,7 @@
 #define DELAY_MS_DEBOUNCE     50
 #define DELAY_MS_LONG_PRESS  480
 #define PERIOD_MS_FLASH     1000
+#define PERIOD_PID_CYCLE_MS 4000
 
 #define MASK_BUTTON_PRESSED      0x01
 #define MASK_BUTTON_LONG_PRESSED 0x02
@@ -82,6 +87,14 @@
 #define START_SET_TEMP_F C_TO_F(START_SET_TEMP_C)
 #define MIN_SET_TEMP_F   C_TO_F(MIN_SET_TEMP_C)
 
+// PID coefficients
+#define K_P 1
+#define K_I 0
+#define K_D 0
+
+#define NUM_INTEGRALS   10
+#define NUM_DERIVATIVES  6
+
 // create the 1-wire bus
 OneWire ds(PIN_ONE_WIRE_BUS);
 
@@ -93,27 +106,28 @@ LedControl mLedControl = LedControl(
     1); // 1 device
 
 // consider byte?
-int mState;
+int mState = STATE_SET_UNITS;
 
-boolean mDisplayInCelsius;
+// error state, one of ERROR_*
+int mErrorCode = 0;
+
+boolean mDisplayInCelsius = true;
 
 // the integer portion of the desired temperature, in the
 // units according to mDisplayInCelsius
-int mDesiredTempIntUserUnits;
+int mDesiredTempIntUserUnits = 0;
 
 // the fraction portion of the desired temperature, in the
 // units according to mDisplayInCelsius (eg, 9 --> 0.9)
-byte mDesiredTempFracUserUnits;
+byte mDesiredTempFracUserUnits = 0;
 
 // the 2-byte desired temperature reading, in sensor scale,
 // ie, in celsius, << 4 (or 16 times the desired celsius
 // value), to be set in temperature setting state
-int mDesiredSensorReading = 0;
+int mSensorReadingDesired = 0;
 
 // the 2-byte temperature reading from the sensor
-int mActualSensorReading = 0;
-
-long mLastTempReadTime = 0;
+int mSensorReadingActual = 0;
 
 // current button reading, bouncy
 int mButtonState[3];
@@ -127,7 +141,37 @@ long mLastDebounceTime[3];
 // time since last button state went HIGH
 long mButtonDownSince[3];
 
+// we only ever read the first 9 bytes from the Scratchpad
+byte mData[9];
+
+// 8 byte address for devices on the 1-wire bus
+byte mAddr[8];
+
+// the last time a blink started
 long mLastBlinkTime = 0;
+
+// the last started PID cycle time
+long mPidCycleStartTime = 0;
+
+// ring buffer of the latest integrals calculated at the start
+// of each PID cycle
+float mIntegrals[NUM_INTEGRALS];
+
+// ring buffer of the latest derivatives calculated at the start
+// of each PID cycle
+float mDerivatives[NUM_DERIVATIVES];
+
+// the next index in mIntegrals to write into
+int mIntegralIdx = 0;
+
+// the next index in mDerivatives to write into
+int mDerivativeIdx = 0;
+
+// the error calculated at the start of the most recent PID cycle
+int mError = 0;
+
+// when the relay should be kept on until
+long mKeepOnUntil = 0;
 
 void setup(void)
 {
@@ -151,19 +195,27 @@ void setup(void)
   mLedControl.setIntensity(0, 8);
   mLedControl.clearDisplay(0);
   
-  // start in temperature setting mode
-  mState = STATE_SET_UNITS;
-  mActualSensorReading = 0;
+  for (int i = 0; i < NUM_INTEGRALS; ++i)
+  {
+    mIntegrals[i] = 0;
+  }
   
-  mDisplayInCelsius = true;
+  for (int i = 0; i < NUM_DERIVATIVES; ++i)
+  {
+    mDerivatives[i] = 0;
+  }
 }
 
 void loop(void)
 {
+  // to avoid mixing display and logic, we'll always first
+  // process input and state, then display
   mState = processInputs(mState);
+  
   display(mState);
   
-  delay(100);
+  // small delay to avoid a lot of unnecessary processing
+  delay(5);
 }
 
 /**
@@ -307,7 +359,7 @@ int processSetTempFrac()
       // of a degree, rather than doing integer division (eg,
       // 85.5C * 16 = 1372.8, let's round that to 1373 in "sensor
       // reading scale")
-      mDesiredSensorReading = (mDesiredTempIntUserUnits << 4)
+      mSensorReadingDesired = (mDesiredTempIntUserUnits << 4)
           + round((mDesiredTempFracUserUnits << 4) / (float) 10);
           
 
@@ -326,7 +378,7 @@ int processSetTempFrac()
       //
       // 16tc = (80(tf(int) + tf(frac)/10) - 2560) / 9
       //      = (80tf(int) + 8tf(frac) - 2560) / 9
-      mDesiredSensorReading = round(
+      mSensorReadingDesired = round(
           ((80 * mDesiredTempIntUserUnits) +
           (8 * mDesiredTempFracUserUnits) -
           2560) / (float) 9);
@@ -340,7 +392,7 @@ int processSetTempFrac()
       Serial.print(mDesiredTempFracUserUnits);
       Serial.println(mDisplayInCelsius ? 'C' : 'F');
       Serial.print("16 * tc: ");
-      Serial.println(mDesiredSensorReading);
+      Serial.println(mSensorReadingDesired);
     }
     
     // zero out the unit-less variables so we don't accidentally
@@ -379,90 +431,72 @@ int processSetTempFrac()
   return STATE_SET_TEMP_FRAC;
 }
 
-byte mTempState;
-long mLastReadTempTime;
-
-// we only ever read the first 9 bytes from the Scratchpad
-byte data[9];
-
-// 8 byte address for devices on the 1-wire bus
-byte addr[8];
-
 int processReadTempStart()
 {
-  int result = findSingleDevice(addr);
+  updateRelayState();
   
-  if (result != NO_ERROR)
+  // find a single device, write its address to mAddr
+  if (!findSingleDevice(mAddr))
   {
     Serial.println("Could not find a single device");
     return STATE_ERROR;
   }
 
+  /*
   if (DEBUG)
   {
     // print out the device's unique address
     Serial.print("addr=");
-    printHexBytes(addr, 8);
+    printHexBytes(mAddr, 8);
     Serial.println();
   }
+  */
   
   // ensure the device is powered externally (otherwise we
   // cannot query the device to ask if it's done its convert 
   // T)
-  result = verifyExternallyPowered(addr);
-  
-  if (result != NO_ERROR)
+  if (!verifyExternallyPowered(mAddr))
   {
     Serial.println("Could not verify device externally powered");
     return STATE_ERROR;
   }
 
-  long now = millis();
-  
-  // break out early if we've read recently
-  if (now - mLastTempReadTime < 2000)
-  {
-    return STATE_READ_TEMP_START;
-  }
-  
-  mLastTempReadTime = now;
-  
-  // query the DS18B20, write into data
-  result = startQuerySensor(addr);
-  if (result != NO_ERROR)
-  {
-    Serial.println("Failed to start a convert T");
-    return STATE_ERROR;
-  }
+  // query the DS18B20
+  startQuerySensor(mAddr);
   
   return STATE_READ_TEMP_WAIT;
 }
 
 int processReadTempWait()
 {
-  int result = readSensorData(addr, data);
+  updateRelayState();
   
-  if (result == STILL_CONVERTING)
+  int result = readSensorData(mAddr, mData);
+  
+  if (result == READ_SENSOR_PROCESSING)
   {
     return STATE_READ_TEMP_WAIT;
   }
-  else if (result != NO_ERROR)
+  else if (result == READ_SENSOR_FAIL)
   {
     Serial.println("Error reading data from sensor");
     return STATE_ERROR;
   }
   
+  /*
   // print out data from the scratchpad
   if (DEBUG)
   {
     Serial.print("data=");
-    printHexBytes(data, 9);
+    printHexBytes(mData, 9);
     Serial.println();
   }
+  */
   
-  // ensure the DS18B20 has the right bit resolution
-  result = validateResolution(addr, data);
-  if (result != NO_ERROR)
+  // while it may seem like we want to do this before reading
+  // the temperature, we have to do the read before we even
+  // know the resolution
+  if (!validateResolution(mAddr, mData))
   {
     Serial.println("Failed to validate resolution after convert T");
     return STATE_ERROR;
@@ -470,9 +504,107 @@ int processReadTempWait()
   
   // first 2 bytes read are the temperature data, with the first
   // byte being the least significant bits
-  mActualSensorReading = (data[1] << 8) | data[0];
+  mSensorReadingActual = (mData[1] << 8) | mData[0];
   
+  // start a PID cycle
   return STATE_READ_TEMP_START;
+}
+
+void updateRelayState()
+{
+  long now = millis();
+  
+  if (now >= mPidCycleStartTime + PERIOD_PID_CYCLE_MS)
+  {
+    Serial.println("Started new PID cycle");
+    
+    // start a new cycle
+    float newError = mSensorReadingDesired - mSensorReadingActual;
+    long dt = now - mPidCycleStartTime;
+    mPidCycleStartTime = now;
+    
+    mIntegralIdx = (mIntegralIdx + 1) % NUM_INTEGRALS;
+    mIntegrals[mIntegralIdx] = newError * dt;
+
+    mDerivativeIdx = (mDerivativeIdx + 1) % NUM_DERIVATIVES;
+    mDerivatives[mDerivativeIdx] = (mError - newError) / dt;
+    
+    mError = newError;
+    Serial.println("-------------------");
+    Serial.print("now: ");
+    Serial.println(now);
+    Serial.print("P: ");
+    Serial.println(mError);
+    Serial.print("I: ");
+    Serial.println(getIntegral());
+    Serial.print("D: ");
+    Serial.println(getDerivative());
+    
+    float val = (K_P * mError) +
+        (K_I * getIntegral()) +
+        (K_D * getDerivative());
+        
+    Serial.print("val: ");
+    Serial.println(val);
+
+    if (val <= 0)
+    {
+      // PID equation could tell us to reverse course (ie, cool
+      // the system down), but we can't control that! In that
+      // scenario, we just wait and let the system naturally
+      // decay. If we've tune our system well enough, that
+      // shouldn't happen too often.
+      
+      mKeepOnUntil = now;
+    }
+    else
+    {
+      // percentage of PERIOD_PID_CYCLE_MS to keep the relay
+      // on for
+      float duty = min(1, val / (10 << 4));
+          
+      Serial.print("duty: ");
+      Serial.println(duty);
+          
+      mKeepOnUntil = now + (duty * PERIOD_PID_CYCLE_MS);
+      
+      if (mKeepOnUntil < now)
+      {
+        Serial.println("Bug! Calculated negative duty");
+      }
+      else
+      {
+        digitalWrite(PIN_RELAY, HIGH);
+        Serial.print("keepOnUntil: ");
+        Serial.println(mKeepOnUntil);
+      }
+    }
+  }
+  else
+  {
+    // in the middle of a cycle
+    
+    if (now > mKeepOnUntil)
+    {
+      digitalWrite(PIN_RELAY, LOW);
+    }
+  }
+}
+
+float getIntegral()
+{
+  float integral = 0;
+  
+  for (int i = 0; i < NUM_INTEGRALS; ++i)
+  {
+    integral += mIntegrals[i];
+  }
+}
+
+float getDerivative()
+{
+  // TODO smooth this out!
+  return mDerivatives[(mDerivativeIdx + 3) % NUM_DERIVATIVES];
 }
 
 int processError()
@@ -512,10 +644,11 @@ void display(int state)
 
 /**
  * Looks for a single device on the 1-wire bus. If found, its
- * address will be written into addr and NO_ERROR will be
- * returned, otherwise an error code will be returned.
+ * address will be written into addr and true will be
+ * returned, otherwise false will be returned, and the error
+ * code willl be written.
  */
-int findSingleDevice(byte *addr)
+boolean findSingleDevice(byte *addr)
 {
   // ensure we're looking for the first device on the 1-wire bus
   ds.reset_search();
@@ -525,18 +658,21 @@ int findSingleDevice(byte *addr)
   // returned, otherwise false is returned.
   if (!ds.search(addr))
   {
-    return ERROR_OWB_NO_DEVICES;
+    mErrorCode = ERROR_OWB_NO_DEVICES;
+    return false;
   }
   
   if (ds.search(addr))
   {
-    return ERROR_OWB_TOO_MANY_DEVICES;
+    mErrorCode = ERROR_OWB_TOO_MANY_DEVICES;
+    return false;
   }
   
   // verify valid address via CRC
   if (OneWire::crc8(addr, 7) != addr[7])
   {
-    return ERROR_OWB_ADDRESS_CRC;
+    mErrorCode = ERROR_OWB_ADDRESS_CRC;
+    return false;
   }
   
   if (addr[0] != 0x28)
@@ -547,13 +683,19 @@ int findSingleDevice(byte *addr)
       Serial.print("supported, found 0x");
       Serial.println(addr[0], HEX);
     }
-    return ERROR_OWB_NOT_28_FAMILY;
+    mErrorCode = ERROR_OWB_NOT_28_FAMILY;
+    return false;
   }
   
-  return NO_ERROR;
+  return true;
 }
 
-int verifyExternallyPowered(byte *addr)
+/**
+ * Returns true if the DS18B20 at the address specified is
+ * externally powered (ie, not in parasitic power mode),
+ * otherwise false.
+ */
+boolean verifyExternallyPowered(byte *addr)
 {
   // issue a "read power supply" command
   ds.reset();
@@ -564,23 +706,27 @@ int verifyExternallyPowered(byte *addr)
   // powered devices will let the bus remain high
   if (ds.read_bit() == 0)
   {
-    return ERROR_OWB_NOT_EXTERNALLY_POWERED;
+    mErrorCode = ERROR_OWB_NOT_EXTERNALLY_POWERED;
+    return false;
   }
   
-  return NO_ERROR;
+  return true;
 }
 
-int startQuerySensor(byte *addr)
+/**
+ * Trigger a Convert T command (ie, get temperature and store
+ * it on the DS18B20's Scratchpad memory).
+ */
+void startQuerySensor(byte *addr)
 {
-  // trigger a Convert T command (ie, get temperature and store it
-  // on the DS18B20's Scratchpad memory)
   ds.reset();
   ds.select(addr);
   ds.write(COMMAND_CONVERT_T);
-  
-  return NO_ERROR;
 }
 
+/**
+ * Attempts to read from the DS18B20's scratchpad.
+ */
 int readSensorData(byte *addr, byte *data)
 {
   // During a Convert T with an externally powered DS18B20, the
@@ -592,10 +738,12 @@ int readSensorData(byte *addr, byte *data)
   // and must wait an arbitrary (but long enough) amount of time
   // for the convert to complete.
   
+  // TODO reset and select addr?
+  
   if (ds.read_bit() == 0)
   {
     // not done converting yet
-    return STILL_CONVERTING;
+    return READ_SENSOR_PROCESSING;
   }
   
   // done converting!
@@ -606,14 +754,22 @@ int readSensorData(byte *addr, byte *data)
   ds.write(COMMAND_READ_SCRATCHPAD);
   ds.read_bytes(data, 9);
   
+  // make sure it matches the CRC
   if (OneWire::crc8(data, 8) != data[8])
   {
-    return ERROR_OWB_SCRATCHPAD_READ_CRC;
+    mErrorCode = ERROR_OWB_SCRATCHPAD_READ_CRC;
+    return READ_SENSOR_FAIL;
   }
-  return NO_ERROR;
+  return READ_SENSOR_SUCCESS;
 }
 
-int validateResolution(byte *addr, byte *data)
+/**
+ * Validates that the temperature read is done so to a 12-bit
+ * resolution (ie, down to 1/16th of a degree Celsius). If not,
+ * resolution will be changed, but the sensor reading will not
+ * change until the next Convert T.
+ */
+boolean validateResolution(byte *addr, byte *data)
 {
   // config register format:
   //
@@ -690,7 +846,8 @@ int validateResolution(byte *addr, byte *data)
       else if (writeAttempts >= 2)
       {
         // error out if we've tried too many times
-        return ERROR_OWB_SCRATCHPAD_WRITE_CRC;
+        mErrorCode = ERROR_OWB_SCRATCHPAD_WRITE_CRC;
+        return false;
       }
     }
     
@@ -700,7 +857,7 @@ int validateResolution(byte *addr, byte *data)
     ds.write(COMMAND_COPY_SCRATCHPAD);
   }
   
-  return NO_ERROR;
+  return true;
 }
 
 void printHexBytes(byte *bytes, int len)
@@ -887,6 +1044,7 @@ void showTemperature(int sensorReading)
   // the "fractional part".
   int fractCelsius = ((readingInScale & 0x000F) * 100) >> 4;
   
+  /*
   if (DEBUG)
   {
     if (isNegative)
@@ -898,6 +1056,7 @@ void showTemperature(int sensorReading)
     Serial.print(fractCelsius);
     Serial.println(" C");
   }
+  */
   
   int hundreds = wholeCelsius / 100;
   int tens = (wholeCelsius % 100) / 10;
@@ -998,12 +1157,12 @@ void displaySetTempFrac()
 
 void displayReadTempStart()
 {
-  showTemperature(mActualSensorReading);
+  showTemperature(mSensorReadingActual);
 }
 
 void displayReadTempWait()
 {
-  showTemperature(mActualSensorReading);
+  showTemperature(mSensorReadingActual);
 }
 
 void blinkDigit(int row, byte value, bool showPoint)
