@@ -599,6 +599,8 @@ float getIntegral()
   {
     integral += mIntegrals[i];
   }
+
+  return integral;
 }
 
 float getDerivative()
