@@ -88,7 +88,7 @@
 #define MIN_SET_TEMP_F   C_TO_F(MIN_SET_TEMP_C)
 
 // PID coefficients
-#define K_P 1
+#define K_P ((float) 3 / 1184)
 #define K_I 0
 #define K_D 0
 
@@ -170,8 +170,9 @@ int mDerivativeIdx = 0;
 // the error calculated at the start of the most recent PID cycle
 int mError = 0;
 
-// when the relay should be kept on until
-long mKeepOnUntil = 0;
+// percentage of how long the relay should be on for during
+// a single PID cycle, in the range [0, 1]
+float mDuty;
 
 void setup(void)
 {
@@ -514,9 +515,27 @@ void updateRelayState()
 {
   long now = millis();
   
-  if (now >= mPidCycleStartTime + PERIOD_PID_CYCLE_MS)
+  if (now < mPidCycleStartTime + PERIOD_PID_CYCLE_MS)
   {
-    Serial.println("Started new PID cycle");
+    // in the middle of a cycle, turn off if we've met our
+    // duty during this PID cycle
+    
+    float pcntThroughCycle =
+        ((float) now - mPidCycleStartTime) / PERIOD_PID_CYCLE_MS;
+    
+    if (pcntThroughCycle >= mDuty)
+    {
+      // TODO save state to avoid always doing this in off-duty?
+      digitalWrite(PIN_RELAY, LOW);
+    }
+  }
+  else
+  {
+    // time to start a new PID cycle!
+    
+    Serial.print(now);
+    Serial.print(',');
+    Serial.println(mSensorReadingActual);
     
     // start a new cycle
     float newError = mSensorReadingDesired - mSensorReadingActual;
@@ -527,66 +546,36 @@ void updateRelayState()
     mIntegrals[mIntegralIdx] = newError * dt;
 
     mDerivativeIdx = (mDerivativeIdx + 1) % NUM_DERIVATIVES;
-    mDerivatives[mDerivativeIdx] = (mError - newError) / dt;
+    mDerivatives[mDerivativeIdx] = (newError - mError) / dt;
     
     mError = newError;
-    Serial.println("-------------------");
-    Serial.print("now: ");
-    Serial.println(now);
-    Serial.print("P: ");
-    Serial.println(mError);
-    Serial.print("I: ");
-    Serial.println(getIntegral());
-    Serial.print("D: ");
-    Serial.println(getDerivative());
     
-    float val = (K_P * mError) +
+    mDuty = (K_P * mError) +
         (K_I * getIntegral()) +
         (K_D * getDerivative());
-        
-    Serial.print("val: ");
-    Serial.println(val);
-
-    if (val <= 0)
+    /*
+    if (DEBUG)
     {
-      // PID equation could tell us to reverse course (ie, cool
-      // the system down), but we can't control that! In that
-      // scenario, we just wait and let the system naturally
-      // decay. If we've tune our system well enough, that
-      // shouldn't happen too often.
-      
-      mKeepOnUntil = now;
-    }
-    else
-    {
-      // percentage of PERIOD_PID_CYCLE_MS to keep the relay
-      // on for
-      float duty = min(1, val / (10 << 4));
-          
-      Serial.print("duty: ");
-      Serial.println(duty);
-          
-      mKeepOnUntil = now + (duty * PERIOD_PID_CYCLE_MS);
-      
-      if (mKeepOnUntil < now)
-      {
-        Serial.println("Bug! Calculated negative duty");
-      }
-      else
-      {
-        digitalWrite(PIN_RELAY, HIGH);
-        Serial.print("keepOnUntil: ");
-        Serial.println(mKeepOnUntil);
-      }
-    }
-  }
-  else
-  {
-    // in the middle of a cycle
+      Serial.println("-------------------");
+      Serial.print("now: ");
+      Serial.println(now);
+      Serial.print("P: ");
+      Serial.println(mError);
+      Serial.print("I: ");
+      Serial.println(getIntegral());
+      Serial.print("D: ");
+      Serial.println(getDerivative());
+      Serial.print("val: ");
+      Serial.println(val);
+    }  
+    */
     
-    if (now > mKeepOnUntil)
+    mDuty = constrain(mDuty, 0, 1);
+    
+    // if there's a noticeable amount of duty, start the relay
+    if (mDuty > 0.001)
     {
-      digitalWrite(PIN_RELAY, LOW);
+      digitalWrite(PIN_RELAY, HIGH);
     }
   }
 }
@@ -605,7 +594,7 @@ float getIntegral()
 
 float getDerivative()
 {
-  // TODO smooth this out!
+  // TODO smooth this out?
   return mDerivatives[(mDerivativeIdx + 3) % NUM_DERIVATIVES];
 }
 
