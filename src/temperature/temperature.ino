@@ -88,12 +88,12 @@
 #define MIN_SET_TEMP_F   C_TO_F(MIN_SET_TEMP_C)
 
 // PID coefficients
-#define K_P ((float) 3 / 1184)
-#define K_I 0
+#define K_P ((float) 6 / 1184)
+#define K_I ((float) 1 / 30)
 #define K_D 0
 
-#define NUM_INTEGRALS   10
-#define NUM_DERIVATIVES  6
+//#define NUM_INTEGRALS   100
+#define NUM_DERIVATIVES   6
 
 // create the 1-wire bus
 OneWire ds(PIN_ONE_WIRE_BUS);
@@ -155,7 +155,8 @@ long mPidCycleStartTime = 0;
 
 // ring buffer of the latest integrals calculated at the start
 // of each PID cycle
-float mIntegrals[NUM_INTEGRALS];
+//float mIntegrals[NUM_INTEGRALS];
+float mI = 0;
 
 // ring buffer of the latest derivatives calculated at the start
 // of each PID cycle
@@ -196,10 +197,12 @@ void setup(void)
   mLedControl.setIntensity(0, 8);
   mLedControl.clearDisplay(0);
   
+  /*
   for (int i = 0; i < NUM_INTEGRALS; ++i)
   {
     mIntegrals[i] = 0;
   }
+  */
   
   for (int i = 0; i < NUM_DERIVATIVES; ++i)
   {
@@ -394,6 +397,14 @@ int processSetTempFrac()
       Serial.println(mDisplayInCelsius ? 'C' : 'F');
       Serial.print("16 * tc: ");
       Serial.println(mSensorReadingDesired);
+      
+      Serial.print("kp: ");
+      Serial.println(K_P * 1184);
+      Serial.print("ki: ");
+      //Serial.println(K_I * 30299);
+      Serial.println(K_I);
+      Serial.print("kd: ");
+      Serial.println(K_D);
     }
     
     // zero out the unit-less variables so we don't accidentally
@@ -542,8 +553,18 @@ void updateRelayState()
     long dt = now - mPidCycleStartTime;
     mPidCycleStartTime = now;
     
-    mIntegralIdx = (mIntegralIdx + 1) % NUM_INTEGRALS;
-    mIntegrals[mIntegralIdx] = newError * dt;
+    //mIntegralIdx = (mIntegralIdx + 1) % NUM_INTEGRALS;
+    //mIntegrals[mIntegralIdx] = newError * dt;
+    
+    // prevent integral windup
+    if (abs(newError) < (10 << 4))
+    {
+      mI += newError * (((float) dt) / 10000);
+    }
+    else
+    {
+      mI = 0;
+    }
 
     mDerivativeIdx = (mDerivativeIdx + 1) % NUM_DERIVATIVES;
     mDerivatives[mDerivativeIdx] = (newError - mError) / dt;
@@ -551,7 +572,7 @@ void updateRelayState()
     mError = newError;
     
     mDuty = (K_P * mError) +
-        (K_I * getIntegral()) +
+        (K_I * (getIntegral() / 3030)) +
         (K_D * getDerivative());
     /*
     if (DEBUG)
@@ -582,6 +603,8 @@ void updateRelayState()
 
 float getIntegral()
 {
+  return mI;
+  /*
   float integral = 0;
   
   for (int i = 0; i < NUM_INTEGRALS; ++i)
@@ -590,6 +613,7 @@ float getIntegral()
   }
 
   return integral;
+  */
 }
 
 float getDerivative()
