@@ -89,7 +89,7 @@
 
 // PID coefficients
 #define K_P ((float) 6 / 1184)
-#define K_I ((float) 1 / 30)
+#define K_I ((float) 1 / 15)
 #define K_D 0
 
 //#define NUM_INTEGRALS   100
