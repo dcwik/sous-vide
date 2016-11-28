@@ -9,6 +9,9 @@
  * sensor connected to pin 10, as well as a 4.7K Ohm resistor
  * between 5V and pin 10.
  *
+ * Data can be read from a terminal using the following:
+ * $ cu -l /dev/ttyACM0 -s 9600 > myCsv.csv
+ *
  * This example code is in the public domain.
  */
  
@@ -155,15 +158,11 @@ long mPidCycleStartTime = 0;
 
 // ring buffer of the latest integrals calculated at the start
 // of each PID cycle
-//float mIntegrals[NUM_INTEGRALS];
-float mI = 0;
+float mIntegral = 0;
 
 // ring buffer of the latest derivatives calculated at the start
 // of each PID cycle
 float mDerivatives[NUM_DERIVATIVES];
-
-// the next index in mIntegrals to write into
-int mIntegralIdx = 0;
 
 // the next index in mDerivatives to write into
 int mDerivativeIdx = 0;
@@ -196,14 +195,7 @@ void setup(void)
   mLedControl.shutdown(0, false);
   mLedControl.setIntensity(0, 8);
   mLedControl.clearDisplay(0);
-  
-  /*
-  for (int i = 0; i < NUM_INTEGRALS; ++i)
-  {
-    mIntegrals[i] = 0;
-  }
-  */
-  
+
   for (int i = 0; i < NUM_DERIVATIVES; ++i)
   {
     mDerivatives[i] = 0;
@@ -401,19 +393,17 @@ int processSetTempFrac()
       Serial.print("kp: ");
       Serial.println(K_P * 1184);
       Serial.print("ki: ");
-      //Serial.println(K_I * 30299);
-      Serial.println(K_I);
+      Serial.println(K_I, 4);
       Serial.print("kd: ");
-      Serial.println(K_D);
+      Serial.println(K_D, 4);
     }
     
     // zero out the unit-less variables so we don't accidentally
     // use them
     mDesiredTempIntUserUnits = 0;
     mDesiredTempFracUserUnits = 0;
-    
-    // TODO don't do this
-    digitalWrite(PIN_RELAY, HIGH);
+
+    //digitalWrite(PIN_RELAY, HIGH);
     
     Serial.println("Attempting to read temperature");
     return STATE_READ_TEMP_START;
@@ -524,6 +514,7 @@ int processReadTempWait()
 
 void updateRelayState()
 {
+  // TODO handle wrap around
   long now = millis();
   
   if (now < mPidCycleStartTime + PERIOD_PID_CYCLE_MS)
@@ -553,17 +544,14 @@ void updateRelayState()
     long dt = now - mPidCycleStartTime;
     mPidCycleStartTime = now;
     
-    //mIntegralIdx = (mIntegralIdx + 1) % NUM_INTEGRALS;
-    //mIntegrals[mIntegralIdx] = newError * dt;
-    
     // prevent integral windup
     if (abs(newError) < (10 << 4))
     {
-      mI += newError * (((float) dt) / 10000);
+      mIntegral += newError * (((float) dt) / 10000);
     }
     else
     {
-      mI = 0;
+      mIntegral = 0;
     }
 
     mDerivativeIdx = (mDerivativeIdx + 1) % NUM_DERIVATIVES;
@@ -572,24 +560,8 @@ void updateRelayState()
     mError = newError;
     
     mDuty = (K_P * mError) +
-        (K_I * (getIntegral() / 3030)) +
+        (K_I * (mIntegral / 3030)) +
         (K_D * getDerivative());
-    /*
-    if (DEBUG)
-    {
-      Serial.println("-------------------");
-      Serial.print("now: ");
-      Serial.println(now);
-      Serial.print("P: ");
-      Serial.println(mError);
-      Serial.print("I: ");
-      Serial.println(getIntegral());
-      Serial.print("D: ");
-      Serial.println(getDerivative());
-      Serial.print("val: ");
-      Serial.println(val);
-    }  
-    */
     
     mDuty = constrain(mDuty, 0, 1);
     
@@ -599,21 +571,6 @@ void updateRelayState()
       digitalWrite(PIN_RELAY, HIGH);
     }
   }
-}
-
-float getIntegral()
-{
-  return mI;
-  /*
-  float integral = 0;
-  
-  for (int i = 0; i < NUM_INTEGRALS; ++i)
-  {
-    integral += mIntegrals[i];
-  }
-
-  return integral;
-  */
 }
 
 float getDerivative()
