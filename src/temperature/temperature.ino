@@ -95,8 +95,9 @@
 #define K_I ((float) 1 / 15)
 #define K_D 0
 
-//#define NUM_INTEGRALS   100
-#define NUM_DERIVATIVES   6
+#define NUM_ERRORS 64
+
+#define SENSOR_READING_HASNT_HAPPENED -32768 // -(1 << 15)
 
 // create the 1-wire bus
 OneWire ds(PIN_ONE_WIRE_BUS);
@@ -130,7 +131,7 @@ byte mDesiredTempFracUserUnits = 0;
 int mSensorReadingDesired = 0;
 
 // the 2-byte temperature reading from the sensor
-int mSensorReadingActual = 0;
+int mSensorReadingActual = SENSOR_READING_HASNT_HAPPENED;
 
 // current button reading, bouncy
 int mButtonState[3];
@@ -153,22 +154,24 @@ byte mAddr[8];
 // the last time a blink started
 long mLastBlinkTime = 0;
 
-// the last started PID cycle time
-long mPidCycleStartTime = 0;
-
 // ring buffer of the latest integrals calculated at the start
 // of each PID cycle
 float mIntegral = 0;
 
-// ring buffer of the latest derivatives calculated at the start
+// ring buffer of the latest error calculated at the start
 // of each PID cycle
-float mDerivatives[NUM_DERIVATIVES];
+float mError[NUM_ERRORS];
 
-// the next index in mDerivatives to write into
-int mDerivativeIdx = 0;
+// ring buffer of the latest times (captured with millis()) at
+// which mError was updated
+float mErrorTime[NUM_ERRORS];
 
-// the error calculated at the start of the most recent PID cycle
-int mError = 0;
+// the index of the current error in mError
+int mErrorIdx = 0;
+
+// whether the PID cycle is the very first one, so that state
+// can be initialized
+boolean mFirstPidCycle = true;
 
 // percentage of how long the relay should be on for during
 // a single PID cycle, in the range [0, 1]
@@ -196,9 +199,10 @@ void setup(void)
   mLedControl.setIntensity(0, 8);
   mLedControl.clearDisplay(0);
 
-  for (int i = 0; i < NUM_DERIVATIVES; ++i)
+  for (int i = 0; i < NUM_ERRORS; ++i)
   {
-    mDerivatives[i] = 0;
+    mError[i] = 0;
+    mErrorTime[i] = 0;
   }
 }
 
@@ -514,16 +518,23 @@ int processReadTempWait()
 
 void updateRelayState()
 {
+  // wait until we have an actual sensor reading before
+  // modifying relay state
+  if (mSensorReadingActual == SENSOR_READING_HASNT_HAPPENED)
+  {
+    return;
+  }
+  
   // TODO handle wrap around
   long now = millis();
   
-  if (now < mPidCycleStartTime + PERIOD_PID_CYCLE_MS)
+  if (now < mErrorTime[mErrorIdx] + PERIOD_PID_CYCLE_MS)
   {
     // in the middle of a cycle, turn off if we've met our
     // duty during this PID cycle
     
     float pcntThroughCycle =
-        ((float) now - mPidCycleStartTime) / PERIOD_PID_CYCLE_MS;
+        ((float) now - mErrorTime[mErrorIdx]) / PERIOD_PID_CYCLE_MS;
     
     if (pcntThroughCycle >= mDuty)
     {
@@ -534,18 +545,43 @@ void updateRelayState()
   else
   {
     // time to start a new PID cycle!
+    float newError = mSensorReadingDesired - mSensorReadingActual;
     
+    if (mFirstPidCycle)
+    {
+      mFirstPidCycle = false;
+      
+      // TODO handle wrap around?
+      long lastTime = now - PERIOD_PID_CYCLE_MS;
+      
+      // pretend we've had a lot of PID cycles at this error,
+      // so that our derivatives can be calculated with somewhat
+      // reasonable numbers instead of 0
+      for (int i = 0; i < NUM_ERRORS; ++i)
+      {
+        mError[i] = newError;
+        mErrorTime[i] = lastTime;
+      }
+    }
+
+    float lastError = mError[mErrorIdx];
+    // TODO deal with wrap around
+    long dt = now - mErrorTime[mErrorIdx];
+    
+    mErrorIdx = (mErrorIdx + 1) % NUM_ERRORS;
+    mError[mErrorIdx] = newError;
+    mErrorTime[mErrorIdx] = now;
+
     Serial.print(now);
     Serial.print(',');
-    Serial.println(mSensorReadingActual);
-    
-    // start a new cycle
-    float newError = mSensorReadingDesired - mSensorReadingActual;
-    long dt = now - mPidCycleStartTime;
-    mPidCycleStartTime = now;
+    Serial.print(mSensorReadingActual);
+    Serial.print(',');
+    Serial.println(getDerivative(), 6);
+
+    boolean inControlRange = abs(newError) < (10 << 4);
     
     // prevent integral windup
-    if (abs(newError) < (10 << 4))
+    if (inControlRange)
     {
       mIntegral += newError * (((float) dt) / 10000);
     }
@@ -554,15 +590,10 @@ void updateRelayState()
       mIntegral = 0;
     }
 
-    mDerivativeIdx = (mDerivativeIdx + 1) % NUM_DERIVATIVES;
-    mDerivatives[mDerivativeIdx] = (newError - mError) / dt;
-    
-    mError = newError;
-    
-    mDuty = (K_P * mError) +
-        (K_I * (mIntegral / 3030)) +
-        (K_D * getDerivative());
-    
+    mDuty = (K_P * mError[mErrorIdx]) +
+        (inControlRange ? (K_I * (mIntegral / 3030)) : 0) +
+        (inControlRange ? (K_D * getDerivative()) : 0);
+
     mDuty = constrain(mDuty, 0, 1);
     
     // if there's a noticeable amount of duty, start the relay
@@ -575,8 +606,23 @@ void updateRelayState()
 
 float getDerivative()
 {
-  // TODO smooth this out?
-  return mDerivatives[(mDerivativeIdx + 3) % NUM_DERIVATIVES];
+  int oldIdx = (mErrorIdx + 1) % NUM_ERRORS;
+  
+  // TODO account for wrap around in time
+  
+  // derivative = rise / run
+  float dxdt = ((float) (mError[mErrorIdx] - mError[oldIdx]))
+      / (mErrorTime[mErrorIdx] - mErrorTime[oldIdx]);
+
+  // Scale it so that the derivative has a maximum range of
+  // roughly [-1, 1].
+  // Through measurement under full duty for a while, it took
+  // 1,116,759ms to change the temperature 10 degrees celsius,
+  // or 160 (ie, 10 << 4) "sensor units" while under full duty.
+  // So, max derivative is roughly 160 / 1,116,759. To scale
+  // that to 1, divide by that number (or multiply by the
+  // inverse).
+  return dxdt * 1116759 / 160;
 }
 
 int processError()
