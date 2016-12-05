@@ -92,8 +92,8 @@
 
 // PID coefficients
 #define K_P ((float) 6 / 1184)
-#define K_I ((float) 1 / 15)
-#define K_D 0
+#define K_I ((float) 23 / 480)
+#define K_D 0 //((float) 20 / 100)
 
 #define NUM_ERRORS 64
 
