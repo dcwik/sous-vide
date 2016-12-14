@@ -91,11 +91,12 @@
 #define MIN_SET_TEMP_F   C_TO_F(MIN_SET_TEMP_C)
 
 // PID coefficients
-#define K_P ((float) 6 / 1184)
-#define K_I ((float) 23 / 480)
-#define K_D 0 //((float) 20 / 100)
+#define OVERSHOOT (2.5 * 16 * 1.4) // 2.5C * "sensor unit conversion" * buffer
+#define K_P ((float) 1 / OVERSHOOT) // P(t) = K_P * e(t), we want P(t) = 1 when e(t) = OVERSHOOT
+#define K_I 0//((float) 1 / (1450 * 50))
+#define K_D 2.0
 
-#define NUM_ERRORS 64
+#define NUM_ERRORS 32
 
 #define SENSOR_READING_HASNT_HAPPENED -32768 // -(1 << 15)
 
@@ -395,7 +396,7 @@ int processSetTempFrac()
       Serial.println(mSensorReadingDesired);
       
       Serial.print("kp: ");
-      Serial.println(K_P * 1184);
+      Serial.println(K_P, 4);
       Serial.print("ki: ");
       Serial.println(K_I, 4);
       Serial.print("kd: ");
@@ -564,37 +565,47 @@ void updateRelayState()
       }
     }
 
-    float lastError = mError[mErrorIdx];
     // TODO deal with wrap around
     long dt = now - mErrorTime[mErrorIdx];
     
     mErrorIdx = (mErrorIdx + 1) % NUM_ERRORS;
     mError[mErrorIdx] = newError;
     mErrorTime[mErrorIdx] = now;
+    
+    float proportionalTerm = K_P * mError[mErrorIdx];
 
-    Serial.print(now);
-    Serial.print(',');
-    Serial.print(mSensorReadingActual);
-    Serial.print(',');
-    Serial.println(getDerivative(), 6);
-
-    boolean inControlRange = abs(newError) < (10 << 4);
+    // only start controlling I and D terms if the proportional
+    // is not pegging out at 100% duty
+    boolean inControlRange = proportionalTerm < 1.0;
     
     // prevent integral windup
     if (inControlRange)
     {
+      // divide integral by 10,000 just to prevent dealing
+      // with huge numbers, and then having to deal with
+      // a very tiny K_I
       mIntegral += newError * (((float) dt) / 10000);
     }
     else
     {
       mIntegral = 0;
     }
-
-    mDuty = (K_P * mError[mErrorIdx]) +
+    
+    mDuty = proportionalTerm +
         (inControlRange ? (K_I * (mIntegral / 3030)) : 0) +
         (inControlRange ? (K_D * getDerivative()) : 0);
 
     mDuty = constrain(mDuty, 0, 1);
+    
+    Serial.print(now);
+    Serial.print(',');
+    Serial.print(mSensorReadingActual);
+    Serial.print(',');
+    Serial.print(mIntegral, 6);
+    Serial.print(',');
+    Serial.print(getDerivative(), 6);
+    Serial.print(',');
+    Serial.println(mDuty);
     
     // if there's a noticeable amount of duty, start the relay
     if (mDuty > 0.001)
@@ -614,7 +625,7 @@ float getDerivative()
   float dxdt = ((float) (mError[mErrorIdx] - mError[oldIdx]))
       / (mErrorTime[mErrorIdx] - mErrorTime[oldIdx]);
 
-  // Scale it so that the derivative has a maximum range of
+  // Scale it so that the derivative has a range of
   // roughly [-1, 1].
   // Through measurement under full duty for a while, it took
   // 1,116,759ms to change the temperature 10 degrees celsius,
@@ -627,6 +638,7 @@ float getDerivative()
 
 int processError()
 {
+  // turn off the relay because there's an error!
   digitalWrite(PIN_RELAY, LOW);
   return STATE_ERROR;
 }
