@@ -93,8 +93,8 @@
 // PID coefficients
 #define OVERSHOOT (2.5 * 16 * 1.4) // 2.5C * "sensor unit conversion" * buffer
 #define K_P ((float) 1 / OVERSHOOT) // P(t) = K_P * e(t), we want P(t) = 1 when e(t) = OVERSHOOT
-#define K_I 0//((float) 1 / (1450 * 50))
-#define K_D 2.0
+#define K_I ((float) 1 / (3000 * 5)) // ~3000 integral at steady state
+#define K_D 1.0
 
 #define NUM_ERRORS 32
 
@@ -398,7 +398,7 @@ int processSetTempFrac()
       Serial.print("kp: ");
       Serial.println(K_P, 4);
       Serial.print("ki: ");
-      Serial.println(K_I, 4);
+      Serial.println(K_I, 8);
       Serial.print("kd: ");
       Serial.println(K_D, 4);
     }
@@ -573,27 +573,38 @@ void updateRelayState()
     mErrorTime[mErrorIdx] = now;
     
     float proportionalTerm = K_P * mError[mErrorIdx];
+    float integralTerm = 0.0;
+    float derivativeTerm = 0.0;
 
-    // only start controlling I and D terms if the proportional
-    // is not pegging out at 100% duty
-    boolean inControlRange = proportionalTerm < 1.0;
-    
-    // prevent integral windup
-    if (inControlRange)
+    // only start controlling I and D terms if the
+    // proportional is not pegging out at 100% duty
+    if (abs(proportionalTerm) < 1.0)
     {
-      // divide integral by 10,000 just to prevent dealing
-      // with huge numbers, and then having to deal with
-      // a very tiny K_I
-      mIntegral += newError * (((float) dt) / 10000);
+      float derivative = getDerivative();
+
+      // If derivative of the error is large and positive (ie, the
+      // temperature is rapidly falling), pause the integral term.
+      // There was an upset to the system (probably cold food being
+      // added), and we pause the integral term to prevent over
+      // reacting and triggering integral wind-up.
+      if (derivative < 0.5)
+      {
+        // divide integral by 10,000 just to prevent dealing
+        // with huge numbers, and then having to deal with
+        // a very tiny K_I
+        mIntegral += newError * (((float) dt) / 10000);
+      }
+
+      integralTerm = K_I * mIntegral;
+      derivativeTerm = K_D * derivative;
     }
     else
     {
+      // prevent integral windup, zero out
       mIntegral = 0;
     }
     
-    mDuty = proportionalTerm +
-        (inControlRange ? (K_I * (mIntegral / 3030)) : 0) +
-        (inControlRange ? (K_D * getDerivative()) : 0);
+    mDuty = proportionalTerm + integralTerm + derivativeTerm;
 
     mDuty = constrain(mDuty, 0, 1);
     
