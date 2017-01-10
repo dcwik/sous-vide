@@ -21,6 +21,8 @@
 // DEBUG can be toggled to make serial communication less noisy
 #define DEBUG true
 
+#define MAX_UNSIGNED_LONG 4294967295 // 2 ^ 32 - 1
+
 // pin assignments
 #define PIN_ONE_WIRE_BUS 10
 #define PIN_LED_DIN       7
@@ -93,8 +95,8 @@
 // PID coefficients
 #define OVERSHOOT (2.5 * 16 * 1.4) // 2.5C * "sensor unit conversion" * buffer
 #define K_P ((float) 1 / OVERSHOOT) // P(t) = K_P * e(t), we want P(t) = 1 when e(t) = OVERSHOOT
-#define K_I ((float) 1 / (3000 * 5)) // ~3000 integral at steady state
-#define K_D 1.0
+#define K_I ((float) 1 / (3000 * 6.5)) // ~3000 integral at steady state
+#define K_D 0.6
 
 #define NUM_ERRORS 32
 
@@ -140,6 +142,8 @@ int mButtonState[3];
 // the debounced state
 int mLastButtonState[3];
 
+boolean mLastRelayState = false;
+
 // the last time the state changed/bounced
 long mLastDebounceTime[3];
 
@@ -165,7 +169,7 @@ float mError[NUM_ERRORS];
 
 // ring buffer of the latest times (captured with millis()) at
 // which mError was updated
-float mErrorTime[NUM_ERRORS];
+unsigned long mErrorTime[NUM_ERRORS];
 
 // the index of the current error in mError
 int mErrorIdx = 0;
@@ -408,8 +412,6 @@ int processSetTempFrac()
     mDesiredTempIntUserUnits = 0;
     mDesiredTempFracUserUnits = 0;
 
-    //digitalWrite(PIN_RELAY, HIGH);
-    
     Serial.println("Attempting to read temperature");
     return STATE_READ_TEMP_START;
   }
@@ -526,21 +528,27 @@ void updateRelayState()
     return;
   }
   
-  // TODO handle wrap around
-  long now = millis();
+  unsigned long now = millis();
   
-  if (now < mErrorTime[mErrorIdx] + PERIOD_PID_CYCLE_MS)
+  unsigned long cycleStart = mErrorTime[mErrorIdx];
+  unsigned long cycleEnd = mErrorTime[mErrorIdx] + PERIOD_PID_CYCLE_MS;
+
+  // handle wrap around of time
+  unsigned long msSinceCycleStart = (cycleStart > cycleEnd)
+        ? (MAX_UNSIGNED_LONG - cycleStart + now)
+        : (now - cycleStart);
+
+  // are we still in the middle of a cycle
+  if (msSinceCycleStart < PERIOD_PID_CYCLE_MS)
   {
-    // in the middle of a cycle, turn off if we've met our
-    // duty during this PID cycle
+    // turn off if we've met our duty during this PID cycle
     
     float pcntThroughCycle =
-        ((float) now - mErrorTime[mErrorIdx]) / PERIOD_PID_CYCLE_MS;
+        ((float) msSinceCycleStart) / PERIOD_PID_CYCLE_MS;
     
     if (pcntThroughCycle >= mDuty)
     {
-      // TODO save state to avoid always doing this in off-duty?
-      digitalWrite(PIN_RELAY, LOW);
+      setRelayState(false);
     }
   }
   else
@@ -552,8 +560,7 @@ void updateRelayState()
     {
       mFirstPidCycle = false;
       
-      // TODO handle wrap around?
-      long lastTime = now - PERIOD_PID_CYCLE_MS;
+      unsigned long lastTime = now - PERIOD_PID_CYCLE_MS;
       
       // pretend we've had a lot of PID cycles at this error,
       // so that our derivatives can be calculated with somewhat
@@ -565,10 +572,10 @@ void updateRelayState()
       }
     }
 
-    // TODO deal with wrap around
-    long dt = now - mErrorTime[mErrorIdx];
-    
+    // increment the error index for mError and mErrorTime
     mErrorIdx = (mErrorIdx + 1) % NUM_ERRORS;
+
+    // write the new error and error time
     mError[mErrorIdx] = newError;
     mErrorTime[mErrorIdx] = now;
     
@@ -577,7 +584,7 @@ void updateRelayState()
     float derivativeTerm = 0.0;
 
     // only start controlling I and D terms if the
-    // proportional is not pegging out at 100% duty
+    // proportional is not pegging out at +/- 100% duty
     if (abs(proportionalTerm) < 1.0)
     {
       float derivative = getDerivative();
@@ -592,7 +599,7 @@ void updateRelayState()
         // divide integral by 10,000 just to prevent dealing
         // with huge numbers, and then having to deal with
         // a very tiny K_I
-        mIntegral += newError * (((float) dt) / 10000);
+        mIntegral += newError * (((float) msSinceCycleStart) / 10000);
       }
 
       integralTerm = K_I * mIntegral;
@@ -605,7 +612,6 @@ void updateRelayState()
     }
     
     mDuty = proportionalTerm + integralTerm + derivativeTerm;
-
     mDuty = constrain(mDuty, 0, 1);
     
     Serial.print(now);
@@ -621,7 +627,7 @@ void updateRelayState()
     // if there's a noticeable amount of duty, start the relay
     if (mDuty > 0.001)
     {
-      digitalWrite(PIN_RELAY, HIGH);
+      setRelayState(true);
     }
   }
 }
@@ -633,6 +639,8 @@ float getDerivative()
   // TODO account for wrap around in time
   
   // derivative = rise / run
+  
+  // TODO float casting not needed, right?
   float dxdt = ((float) (mError[mErrorIdx] - mError[oldIdx]))
       / (mErrorTime[mErrorIdx] - mErrorTime[oldIdx]);
 
@@ -650,7 +658,7 @@ float getDerivative()
 int processError()
 {
   // turn off the relay because there's an error!
-  digitalWrite(PIN_RELAY, LOW);
+  setRelayState(false);
   return STATE_ERROR;
 }
 
@@ -984,6 +992,19 @@ boolean checkButtonState(byte state, byte pin, byte mask)
   }
     
   return (state & (mask << (shift * 2))) != 0;
+}
+
+/**
+ * Helper method to not call digitalWrite if the relay is
+ * already set to the desired state.
+ */
+void setRelayState(boolean powered)
+{
+  if (mLastRelayState != powered)
+  {
+    mLastRelayState = powered;
+    digitalWrite(PIN_RELAY, powered ? HIGH : LOW);
+  }
 }
 
 /**
