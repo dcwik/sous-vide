@@ -21,7 +21,7 @@
 // DEBUG can be toggled to make serial communication less noisy
 #define DEBUG true
 
-#define MAX_UNSIGNED_LONG 4294967295 // 2 ^ 32 - 1
+#define MAX_UNSIGNED_LONG 0xFFFFFFFF // 2 ^ 32 - 1
 
 // pin assignments
 #define PIN_ONE_WIRE_BUS 10
@@ -95,7 +95,7 @@
 // PID coefficients
 #define OVERSHOOT (2.5 * 16 * 1.4) // 2.5C * "sensor unit conversion" * buffer
 #define K_P ((float) 1 / OVERSHOOT) // P(t) = K_P * e(t), we want P(t) = 1 when e(t) = OVERSHOOT
-#define K_I ((float) 1 / (3000 * 6.5)) // ~3000 integral at steady state
+#define K_I ((float) 1 / (3000 * 5.5)) // ~3000 integral at steady state
 #define K_D 0.6
 
 #define NUM_ERRORS 32
@@ -613,7 +613,7 @@ void updateRelayState()
     
     mDuty = proportionalTerm + integralTerm + derivativeTerm;
     mDuty = constrain(mDuty, 0, 1);
-    
+
     Serial.print(now);
     Serial.print(',');
     Serial.print(mSensorReadingActual);
@@ -636,13 +636,16 @@ float getDerivative()
 {
   int oldIdx = (mErrorIdx + 1) % NUM_ERRORS;
   
-  // TODO account for wrap around in time
+  unsigned long pastTime = mErrorTime[oldIdx];
+  unsigned long now = mErrorTime[mErrorIdx];
+  
+  // time can wrap around after MAX_UNSIGNED_LONG, account for it
+  unsigned long duration = (pastTime > now)
+      ? MAX_UNSIGNED_LONG - pastTime + now
+      : now - pastTime;
   
   // derivative = rise / run
-  
-  // TODO float casting not needed, right?
-  float dxdt = ((float) (mError[mErrorIdx] - mError[oldIdx]))
-      / (mErrorTime[mErrorIdx] - mErrorTime[oldIdx]);
+  float dxdt = (mError[mErrorIdx] - mError[oldIdx]) / duration;
 
   // Scale it so that the derivative has a range of
   // roughly [-1, 1].
